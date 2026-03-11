@@ -1,0 +1,1100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>墨境 · AI 长篇小说写作平台</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+</head>
+<body>
+    <!-- ========== 顶部导航栏 ========== -->
+    <header class="top-bar">
+        <div class="top-bar-left">
+            <div class="logo">
+                <i class="fas fa-feather-pointed"></i>
+                <span>墨境</span>
+            </div>
+            <div class="book-selector">
+                <select id="currentBook" onchange="App.switchBook(this.value)">
+                    <option value="">— 选择书籍 —</option>
+                </select>
+                <button class="btn btn-sm btn-ghost" onclick="App.showNewBookDialog()" title="新建书籍">
+                    <i class="fas fa-plus"></i>
+                </button>
+            </div>
+        </div>
+        <div class="top-bar-center">
+            <div class="word-count-bar">
+                <span id="wordCountDisplay">0 字</span>
+                <span class="sep">|</span>
+                <span id="tokenDisplay">Token: 0</span>
+            </div>
+        </div>
+        <div class="top-bar-right">
+            <span class="user-pill" id="userPill" title="当前账号">未登录</span>
+            <button class="btn btn-sm btn-ghost" onclick="App.showExportMenu()" title="导出">
+                <i class="fas fa-file-export"></i>
+            </button>
+            <button class="btn btn-sm btn-ghost" onclick="App.showImportDialog()" title="导入">
+                <i class="fas fa-file-import"></i>
+            </button>
+            <button class="btn btn-sm btn-ghost" id="focusModeBtn" onclick="App.toggleFocusMode()" title="无干扰纯净模式">
+                <i class="fas fa-expand"></i>
+            </button>
+            <button class="btn btn-sm btn-ghost" onclick="App.openSettings()" title="设置">
+                <i class="fas fa-cog"></i>
+            </button>
+            <button class="btn btn-sm btn-ghost" onclick="App.logout()" title="退出登录">
+                <i class="fas fa-right-from-bracket"></i>
+            </button>
+        </div>
+    </header>
+
+    <!-- ========== 主内容区：三栏布局 ========== -->
+    <main class="workspace">
+        <!-- ===== 左侧面板：目录 + 设定 ===== -->
+        <aside class="panel-left" id="panelLeft">
+            <div class="panel-tabs">
+                <button class="panel-tab active" data-tab="outline" onclick="App.switchLeftTab('outline')">
+                    <i class="fas fa-list-tree"></i> 目录
+                </button>
+                <button class="panel-tab" data-tab="lorebook" onclick="App.switchLeftTab('lorebook')">
+                    <i class="fas fa-book-atlas"></i> 设定
+                </button>
+                <button class="panel-tab" data-tab="graph" onclick="App.switchLeftTab('graph')">
+                    <i class="fas fa-diagram-project"></i> 图谱
+                </button>
+            </div>
+
+            <!-- 目录树 -->
+            <div class="panel-content tab-content active" id="tabOutline">
+                <div class="panel-toolbar">
+                    <button class="btn btn-xs btn-primary" onclick="App.addNode('volume')">
+                        <i class="fas fa-plus"></i> 卷
+                    </button>
+                    <button class="btn btn-xs btn-primary" onclick="App.addNode('chapter')">
+                        <i class="fas fa-plus"></i> 章
+                    </button>
+                    <button class="btn btn-xs btn-primary" onclick="App.addNode('scene')">
+                        <i class="fas fa-plus"></i> 场景
+                    </button>
+                </div>
+                <div class="tree-container" id="docTree"
+                     ondragover="App.onTreeDragOver(event)"
+                     ondrop="App.onTreeDropToRoot(event)"></div>
+            </div>
+
+            <!-- 设定集 Lorebook -->
+            <div class="panel-content tab-content" id="tabLorebook">
+                <div class="panel-toolbar">
+                    <button class="btn btn-xs btn-primary" onclick="App.addLorebookEntry()">
+                        <i class="fas fa-plus"></i> 新条目
+                    </button>
+                    <select class="filter-select" id="lorebookFilter" onchange="App.filterLorebook()">
+                        <option value="">全部</option>
+                        <option value="character">角色</option>
+                        <option value="location">地点</option>
+                        <option value="item">物品</option>
+                        <option value="faction">派系</option>
+                        <option value="law">法则</option>
+                    </select>
+                </div>
+                <div class="lorebook-list" id="lorebookList"></div>
+            </div>
+
+            <!-- 实体图谱 -->
+            <div class="panel-content tab-content" id="tabGraph">
+                <div class="panel-toolbar">
+                    <button class="btn btn-xs btn-primary" onclick="App.addRelation()">
+                        <i class="fas fa-plus"></i> 添加关系
+                    </button>
+                </div>
+                <div class="graph-container" id="entityGraph"></div>
+            </div>
+        </aside>
+
+        <!-- ===== 中间：编辑器 ===== -->
+        <section class="panel-center" id="panelCenter">
+            <!-- 编辑器工具栏 -->
+            <div class="editor-toolbar">
+                <div class="editor-toolbar-left">
+                    <span class="current-path" id="editorPath">未选择章节</span>
+                    <span class="status-badge" id="statusBadge">草稿</span>
+                </div>
+                <div class="editor-toolbar-right">
+                    <button class="btn btn-xs btn-ghost" onclick="App.toggleVersions()" title="版本管理">
+                        <i class="fas fa-code-branch"></i>
+                    </button>
+                    <button class="btn btn-xs btn-ghost" onclick="App.showDiffView()" title="对比视图">
+                        <i class="fas fa-code-compare"></i>
+                    </button>
+                    <select class="style-select" id="nodeStatus" onchange="App.updateNodeStatus()">
+                        <option value="draft">草稿</option>
+                        <option value="final">定稿</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- 版本栏 -->
+            <div class="version-bar" id="versionBar" style="display:none;">
+                <div class="version-list" id="versionList"></div>
+                <div class="version-compare">
+                    <select id="versionDiffFrom" title="对比源分支"></select>
+                    <select id="versionDiffTo" title="对比目标分支"></select>
+                    <button class="btn btn-xs btn-ghost" onclick="App.compareVersions()">
+                        <i class="fas fa-code-compare"></i> 分支Diff
+                    </button>
+                </div>
+                <button class="btn btn-xs btn-ghost" onclick="App.createABCVersions()" title="一次创建 A/B/C 分支">
+                    <i class="fas fa-code-branch"></i> A/B/C
+                </button>
+                <button class="btn btn-xs btn-primary" onclick="App.createVersion()">
+                    <i class="fas fa-plus"></i> 新版本
+                </button>
+            </div>
+
+            <!-- 主编辑区 -->
+            <div class="editor-wrapper">
+                <div class="editor-area" id="editorArea" contenteditable="true"
+                     oninput="App.onEditorInput()"
+                     onkeydown="App.onEditorKeydown(event)"
+                     data-placeholder="在此开始写作...&#10;&#10;输入 / 唤出快捷指令菜单&#10;按 Tab 接受自动补全">
+                </div>
+                <!-- Ghost Text 自动补全浮层 -->
+                <div class="ghost-text-overlay" id="ghostTextOverlay" style="display:none;">
+                    <span class="ghost-text" id="ghostText"></span>
+                </div>
+                <!-- 自动补全状态指示 -->
+                <div class="autocomplete-indicator" id="autocompleteIndicator" style="display:none;">
+                    <i class="fas fa-magic"></i> <span id="autocompleteStatus">思考中...</span>
+                </div>
+                <!-- 行内指令菜单 -->
+                <div class="slash-menu" id="slashMenu" style="display:none;">
+                    <div class="slash-menu-item" onclick="App.execSlash('continue')">
+                        <i class="fas fa-pen-fancy"></i> 续写
+                    </div>
+                    <div class="slash-menu-item" onclick="App.execSlash('rewrite')">
+                        <i class="fas fa-rotate"></i> 改写本段
+                    </div>
+                    <div class="slash-menu-item" onclick="App.execSlash('expand_env')">
+                        <i class="fas fa-mountain-sun"></i> 扩写环境
+                    </div>
+                    <div class="slash-menu-item" onclick="App.execSlash('simplify_dialogue')">
+                        <i class="fas fa-comment-dots"></i> 精简对话
+                    </div>
+                    <div class="slash-menu-item" onclick="App.execSlash('add_tension')">
+                        <i class="fas fa-bolt"></i> 增加紧张感
+                    </div>
+                    <div class="slash-menu-item" onclick="App.execSlash('inner_monologue')">
+                        <i class="fas fa-brain"></i> 内心独白
+                    </div>
+                    <div class="slash-menu-divider"></div>
+                    <div class="slash-menu-item" onclick="App.execSlash('smart_continue')">
+                        <i class="fas fa-forward"></i> 智能续写
+                    </div>
+                    <div class="slash-menu-item" onclick="App.triggerConflictDesign()">
+                        <i class="fas fa-fire"></i> 冲突设计
+                    </div>
+                    <div class="slash-menu-item" onclick="App.triggerBrainstorm()">
+                        <i class="fas fa-lightbulb"></i> 联想风暴
+                    </div>
+                    <div class="slash-menu-item" onclick="App.triggerPlanAndSolve()">
+                        <i class="fas fa-layer-group"></i> Plan模式
+                    </div>
+                    <div class="slash-menu-item" onclick="App.triggerHallucinationCheck()">
+                        <i class="fas fa-shield-halved"></i> 幻觉检测
+                    </div>
+                </div>
+            </div>
+
+            <!-- 幻觉检测警告栏 -->
+            <div class="hallucination-alert-bar" id="hallucinationAlertBar" style="display:none;">
+                <div class="hallucination-alert-icon"><i class="fas fa-triangle-exclamation"></i></div>
+                <div class="hallucination-alert-content">
+                    <strong>幻觉检测：发现矛盾</strong>
+                    <div class="hallucination-alert-details" id="hallucinationAlertDetails"></div>
+                </div>
+                <div class="hallucination-alert-actions">
+                    <button class="btn btn-xs btn-warning" onclick="App.dismissHallucinationAlert()">忽略</button>
+                    <button class="btn btn-xs btn-primary" onclick="App.resampleDrafter()">重采样</button>
+                    <button class="btn btn-xs btn-danger" onclick="App.showHallucinationDetails()">查看详情</button>
+                </div>
+            </div>
+
+            <!-- 底部状态栏 -->
+            <div class="editor-status-bar">
+                <span id="editorWordCount">0 字</span>
+                <span class="sep">|</span>
+                <span id="autoSaveStatus">已保存</span>
+                <div class="streaming-controls" id="streamingControls" style="display:none;">
+                    <div class="streaming-indicator">
+                        <span class="pulse-dot"></span> AI 生成中...
+                    </div>
+                    <button class="btn btn-xs btn-danger" onclick="App.stopGeneration()">
+                        <i class="fas fa-stop"></i> 停止
+                    </button>
+                </div>
+            </div>
+        </section>
+
+        <!-- ===== 右侧面板：Agent 工作台 ===== -->
+        <aside class="panel-right" id="panelRight">
+            <div class="panel-tabs">
+                <button class="panel-tab active" data-tab="agent" onclick="App.switchRightTab('agent')">
+                    <i class="fas fa-robot"></i> 智能体
+                </button>
+                <button class="panel-tab" data-tab="memory" onclick="App.switchRightTab('memory')">
+                    <i class="fas fa-database"></i> 记忆
+                </button>
+            </div>
+
+            <!-- Agent 工作台 -->
+            <div class="panel-content tab-content active" id="tabAgent">
+                <!-- Agent 选择 -->
+                <div class="agent-selector">
+                    <button class="agent-btn active" data-agent="planner" onclick="App.selectAgent('planner')">
+                        <i class="fas fa-sitemap"></i>
+                        <span>架构师</span>
+                    </button>
+                    <button class="agent-btn" data-agent="beats" onclick="App.selectAgent('beats')">
+                        <i class="fas fa-music"></i>
+                        <span>节拍器</span>
+                    </button>
+                    <button class="agent-btn" data-agent="drafter" onclick="App.selectAgent('drafter')">
+                        <i class="fas fa-pen-nib"></i>
+                        <span>执笔者</span>
+                    </button>
+                    <button class="agent-btn" data-agent="validator" onclick="App.selectAgent('validator')">
+                        <i class="fas fa-check-double"></i>
+                        <span>验证者</span>
+                    </button>
+                    <button class="agent-btn" data-agent="polisher" onclick="App.selectAgent('polisher')">
+                        <i class="fas fa-gem"></i>
+                        <span>润色</span>
+                    </button>
+                    <button class="agent-btn" data-agent="continuation" onclick="App.selectAgent('continuation')">
+                        <i class="fas fa-forward"></i>
+                        <span>续写</span>
+                    </button>
+                    <button class="agent-btn" data-agent="conflict" onclick="App.selectAgent('conflict')">
+                        <i class="fas fa-fire"></i>
+                        <span>冲突</span>
+                    </button>
+                    <button class="agent-btn" data-agent="brainstorm" onclick="App.selectAgent('brainstorm')">
+                        <i class="fas fa-lightbulb"></i>
+                        <span>联想</span>
+                    </button>
+                    <button class="agent-btn" data-agent="foreshadow" onclick="App.selectAgent('foreshadow')">
+                        <i class="fas fa-eye"></i>
+                        <span>伏笔</span>
+                    </button>
+                    <button class="agent-btn" data-agent="subtext" onclick="App.selectAgent('subtext')">
+                        <i class="fas fa-masks-theater"></i>
+                        <span>潜台词</span>
+                    </button>
+                    <button class="agent-btn" data-agent="psychology" onclick="App.selectAgent('psychology')">
+                        <i class="fas fa-brain"></i>
+                        <span>心理</span>
+                    </button>
+                    <button class="agent-btn" data-agent="worldstate" onclick="App.selectAgent('worldstate')">
+                        <i class="fas fa-globe"></i>
+                        <span>世界态</span>
+                    </button>
+                    <button class="agent-btn" data-agent="plansolve" onclick="App.selectAgent('plansolve')">
+                        <i class="fas fa-layer-group"></i>
+                        <span>Plan模式</span>
+                    </button>
+                    <button class="agent-btn" data-agent="hallcheck" onclick="App.selectAgent('hallcheck')">
+                        <i class="fas fa-shield-halved"></i>
+                        <span>幻觉检测</span>
+                    </button>
+                </div>
+
+                <!-- 各Agent面板 -->
+                <div class="agent-panels">
+                    <!-- 架构师 -->
+                    <div class="agent-panel active" id="agentPlanner">
+                        <div class="agent-input-group">
+                            <label>灵感 / 一句话概述</label>
+                            <textarea id="plannerInspiration" rows="3" placeholder="输入你的故事灵感..."></textarea>
+                        </div>
+                        <div class="agent-input-row">
+                            <div class="agent-input-group">
+                                <label>卷数</label>
+                                <input type="number" id="plannerVolumes" value="3" min="1" max="20">
+                            </div>
+                            <div class="agent-input-group">
+                                <label>每卷章数</label>
+                                <input type="number" id="plannerChapters" value="10" min="1" max="50">
+                            </div>
+                        </div>
+                        <div class="agent-input-group">
+                            <label>类型</label>
+                            <select id="plannerGenre">
+                                <option value="">自由发挥</option>
+                                <option value="玄幻">玄幻</option>
+                                <option value="仙侠">仙侠</option>
+                                <option value="都市">都市</option>
+                                <option value="科幻">科幻</option>
+                                <option value="悬疑">悬疑</option>
+                                <option value="历史">历史</option>
+                                <option value="言情">言情</option>
+                                <option value="武侠">武侠</option>
+                            </select>
+                        </div>
+                        <button class="btn btn-primary btn-block" onclick="App.runPlanner()">
+                            <i class="fas fa-wand-magic-sparkles"></i> 生成大纲
+                        </button>
+                    </div>
+
+                    <!-- 节拍器 -->
+                    <div class="agent-panel" id="agentBeats">
+                        <div class="agent-input-group">
+                            <label>章节大纲</label>
+                            <textarea id="beatsOutline" rows="5" placeholder="输入章节大纲或从架构师结果中选取..."></textarea>
+                        </div>
+                        <button class="btn btn-primary btn-block" onclick="App.runBeats()">
+                            <i class="fas fa-music"></i> 生成场景节拍
+                        </button>
+                    </div>
+
+                    <!-- 执笔者 -->
+                    <div class="agent-panel" id="agentDrafter">
+                        <div class="agent-input-group">
+                            <label>场景节拍 / 指示</label>
+                            <textarea id="drafterBeat" rows="3" placeholder="描述要写的场景，或留空自动续写..."></textarea>
+                        </div>
+                        <div class="agent-input-group">
+                            <label>文风</label>
+                            <select id="drafterStyle">
+                                <option value="自然流畅">自然流畅</option>
+                                <option value="白描">白描</option>
+                                <option value="华丽">华丽</option>
+                                <option value="悬疑">悬疑</option>
+                                <option value="诗意">诗意</option>
+                                <option value="幽默">幽默</option>
+                            </select>
+                        </div>
+                        <div class="hallucination-guard-toggle" style="margin:8px 0;">
+                            <label class="toggle-label">
+                                <input type="checkbox" id="drafterGuardToggle" checked>
+                                <span class="toggle-switch"></span>
+                                <span>幻觉防护</span>
+                            </label>
+                        </div>
+                        <button class="btn btn-primary btn-block" onclick="App.runDrafter()">
+                            <i class="fas fa-pen-nib"></i> 开始创作
+                        </button>
+                    </div>
+
+                    <!-- 验证者 -->
+                    <div class="agent-panel" id="agentValidator">
+                        <p class="agent-hint">验证当前编辑器中的文本，检查 OOC、时间线矛盾和逻辑问题。</p>
+                        <button class="btn btn-primary btn-block" onclick="App.runValidator()">
+                            <i class="fas fa-check-double"></i> 开始校验
+                        </button>
+                    </div>
+
+                    <!-- 润色 -->
+                    <div class="agent-panel" id="agentPolisher">
+                        <div class="agent-input-group">
+                            <label>润色风格</label>
+                            <select id="polisherStyle">
+                                <option value="华丽">华丽</option>
+                                <option value="白描">白描</option>
+                                <option value="悬疑">悬疑</option>
+                                <option value="幽默">幽默</option>
+                                <option value="诗意">诗意</option>
+                            </select>
+                        </div>
+                        <div class="agent-input-group">
+                            <label>附加指令（可选）</label>
+                            <input type="text" id="polisherInstruction" placeholder="如：增加环境描写...">
+                        </div>
+                        <p class="agent-hint">选中编辑器中的文本后点击润色，或对全文进行润色。</p>
+                        <button class="btn btn-primary btn-block" onclick="App.runPolisher()">
+                            <i class="fas fa-gem"></i> 润色文本
+                        </button>
+                    </div>
+
+                    <!-- 智能续写 -->
+                    <div class="agent-panel" id="agentContinuation">
+                        <div class="agent-input-group">
+                            <label>期望方向（可选）</label>
+                            <textarea id="continuationGoal" rows="2" placeholder="如：主角发现了密室中的秘密..."></textarea>
+                        </div>
+                        <div class="agent-input-row">
+                            <div class="agent-input-group">
+                                <label>文风</label>
+                                <select id="continuationStyle">
+                                    <option value="自然流畅">自然流畅</option>
+                                    <option value="白描">白描</option>
+                                    <option value="华丽">华丽</option>
+                                    <option value="悬疑">悬疑</option>
+                                    <option value="诗意">诗意</option>
+                                </select>
+                            </div>
+                            <div class="agent-input-group">
+                                <label>模式</label>
+                                <select id="continuationMode">
+                                    <option value="critique">批评重试</option>
+                                    <option value="fast">快速续写</option>
+                                    <option value="plan">Plan模式</option>
+                                </select>
+                            </div>
+                        </div>
+                        <p class="agent-hint">
+                            <i class="fas fa-info-circle"></i>
+                            批评重试：生成后由验证Agent审查，不合格则重写（更高质量）。
+                            快速续写：直接流式输出（更低延迟）。
+                            Plan模式：先拆解场景计划，再分阶段生成正文（更强结构控制）。
+                        </p>
+                        <button class="btn btn-primary btn-block" onclick="App.runContinuation()">
+                            <i class="fas fa-forward"></i> 智能续写
+                        </button>
+                    </div>
+
+                    <!-- 冲突设计 -->
+                    <div class="agent-panel" id="agentConflict">
+                        <div class="agent-input-group">
+                            <label>情节背景</label>
+                            <textarea id="conflictContext" rows="2" placeholder="当前故事走到哪了..."></textarea>
+                        </div>
+                        <div class="agent-input-row">
+                            <div class="agent-input-group">
+                                <label>涉及角色</label>
+                                <input type="text" id="conflictCharacters" placeholder="留空自动选择">
+                            </div>
+                            <div class="agent-input-group">
+                                <label>冲突类型</label>
+                                <select id="conflictType">
+                                    <option value="all">全类型</option>
+                                    <option value="person_vs_person">人 vs 人</option>
+                                    <option value="person_vs_env">人 vs 环境</option>
+                                    <option value="person_vs_self">人 vs 自我</option>
+                                </select>
+                            </div>
+                        </div>
+                        <p class="agent-hint">
+                            <i class="fas fa-fire"></i>
+                            基于角色设定和关系图谱，生成对抗矩阵和3种冲突方案（A/B/C）
+                        </p>
+                        <button class="btn btn-primary btn-block" onclick="App.runConflictDesign()">
+                            <i class="fas fa-fire"></i> 生成冲突方案
+                        </button>
+                    </div>
+
+                    <!-- 联想/头脑风暴 -->
+                    <div class="agent-panel" id="agentBrainstorm">
+                        <div class="agent-input-group">
+                            <label>种子文本</label>
+                            <textarea id="brainstormSeed" rows="3" placeholder="输入一段文本，或留空使用编辑器当前内容..."></textarea>
+                        </div>
+                        <div class="agent-input-group">
+                            <label>探针维度</label>
+                            <select id="brainstormDimension">
+                                <option value="all">全维度发散</option>
+                                <option value="causal">因果推演</option>
+                                <option value="reverse">意外反转</option>
+                                <option value="detail">细节放大</option>
+                            </select>
+                        </div>
+                        <p class="agent-hint">
+                            <i class="fas fa-lightbulb"></i>
+                            高温度(T=1.0)多探针并行，从因果/反转/细节三维度发散生成创意卡片
+                        </p>
+                        <button class="btn btn-primary btn-block" onclick="App.runBrainstorm()">
+                            <i class="fas fa-lightbulb"></i> 发散联想
+                        </button>
+                        <!-- 联想卡片网格 -->
+                        <div class="brainstorm-cards" id="brainstormCards" style="display:none;"></div>
+                    </div>
+
+                    <!-- 伏笔追踪 -->
+                    <div class="agent-panel" id="agentForeshadow">
+                        <div class="agent-input-group">
+                            <label>文本内容</label>
+                            <textarea id="foreshadowText" rows="3" placeholder="粘贴要检测伏笔的文本，或留空使用编辑器内容..."></textarea>
+                        </div>
+                        <div class="agent-input-row">
+                            <button class="btn btn-primary" onclick="App.runForeshadowDetect()" style="flex:1">
+                                <i class="fas fa-eye"></i> 检测伏笔
+                            </button>
+                            <button class="btn btn-accent" onclick="App.runForeshadowScan()" style="flex:1">
+                                <i class="fas fa-crosshairs"></i> 扫描待填坑
+                            </button>
+                        </div>
+                        <div class="foreshadow-list" id="foreshadowList">
+                            <p class="agent-hint"><i class="fas fa-info-circle"></i> 检测文本中的伏笔元素，或扫描未填坑的伏笔池</p>
+                        </div>
+                    </div>
+
+                    <!-- 潜台词分析 -->
+                    <div class="agent-panel" id="agentSubtext">
+                        <div class="agent-input-group">
+                            <label>对话/场景文本</label>
+                            <textarea id="subtextText" rows="3" placeholder="粘贴包含对话的文本..."></textarea>
+                        </div>
+                        <div class="agent-input-group">
+                            <label>涉及角色（可选）</label>
+                            <input type="text" id="subtextCharacters" placeholder="角色名，逗号分隔">
+                        </div>
+                        <p class="agent-hint"><i class="fas fa-masks-theater"></i> 双轨分析：表面台词 vs 潜台词，揭示角色真实意图</p>
+                        <button class="btn btn-primary btn-block" onclick="App.runSubtextAnalysis()">
+                            <i class="fas fa-masks-theater"></i> 分析潜台词
+                        </button>
+                    </div>
+
+                    <!-- 心理透视 -->
+                    <div class="agent-panel" id="agentPsychology">
+                        <div class="agent-input-group">
+                            <label>文本内容</label>
+                            <textarea id="psychologyText" rows="3" placeholder="粘贴要分析的文本..."></textarea>
+                        </div>
+                        <div class="agent-input-group">
+                            <label>聚焦角色</label>
+                            <input type="text" id="psychologyCharacter" placeholder="留空自动识别主要角色">
+                        </div>
+                        <p class="agent-hint"><i class="fas fa-brain"></i> 融合弗洛伊德/荣格/阿德勒理论的深层心理解读</p>
+                        <button class="btn btn-primary btn-block" onclick="App.runPsychologyLens()">
+                            <i class="fas fa-brain"></i> 深层心理分析
+                        </button>
+                    </div>
+
+                    <!-- 世界状态 -->
+                    <div class="agent-panel" id="agentWorldstate">
+                        <div class="agent-input-group">
+                            <label>文本内容</label>
+                            <textarea id="worldstateText" rows="3" placeholder="粘贴要提取/验证状态的文本..."></textarea>
+                        </div>
+                        <div class="agent-input-row">
+                            <button class="btn btn-primary" onclick="App.runWorldStateExtract()" style="flex:1">
+                                <i class="fas fa-download"></i> 提取状态
+                            </button>
+                            <button class="btn btn-accent" onclick="App.runWorldStateValidate()" style="flex:1">
+                                <i class="fas fa-check-circle"></i> 验证一致性
+                            </button>
+                        </div>
+                        <div class="world-state-list" id="worldStateList">
+                            <p class="agent-hint"><i class="fas fa-globe"></i> 追踪角色位置、时间线、物品状态等世界要素</p>
+                        </div>
+                    </div>
+
+                    <!-- Module 11: Plan 模式 / Plan-and-Solve -->
+                    <div class="agent-panel" id="agentPlansolve">
+                        <div class="agent-input-group">
+                            <label>场景节拍 / 指示</label>
+                            <textarea id="plansolveBeat" rows="3" placeholder="描述要写的场景节拍..."></textarea>
+                        </div>
+                        <div class="agent-input-group">
+                            <label>文风</label>
+                            <select id="plansolveStyle">
+                                <option value="自然流畅">自然流畅</option>
+                                <option value="白描">白描</option>
+                                <option value="华丽">华丽</option>
+                                <option value="悬疑">悬疑</option>
+                                <option value="诗意">诗意</option>
+                                <option value="幽默">幽默</option>
+                            </select>
+                        </div>
+                        <p class="agent-hint">
+                            <i class="fas fa-layer-group"></i>
+                            Plan-and-Solve 三阶段管线：变量提取 → 分步求解(动机/对话/场景) → 整合润色
+                        </p>
+                        <!-- 阶段进度指示器 -->
+                        <div class="phase-progress" id="phaseProgress" style="display:none;">
+                            <div class="phase-step completed" data-phase="1">
+                                <div class="phase-dot"></div>
+                                <span>规划</span>
+                            </div>
+                            <div class="phase-connector"></div>
+                            <div class="phase-step" data-phase="2A">
+                                <div class="phase-dot"></div>
+                                <span>动机</span>
+                            </div>
+                            <div class="phase-connector"></div>
+                            <div class="phase-step" data-phase="2B">
+                                <div class="phase-dot"></div>
+                                <span>对话</span>
+                            </div>
+                            <div class="phase-connector"></div>
+                            <div class="phase-step" data-phase="2C">
+                                <div class="phase-dot"></div>
+                                <span>场景</span>
+                            </div>
+                            <div class="phase-connector"></div>
+                            <div class="phase-step" data-phase="3">
+                                <div class="phase-dot"></div>
+                                <span>润色</span>
+                            </div>
+                        </div>
+                        <button class="btn btn-primary btn-block" onclick="App.runPlanAndSolve()">
+                            <i class="fas fa-layer-group"></i> Plan模式生成
+                        </button>
+                    </div>
+
+                    <!-- Module 12: 幻觉检测 -->
+                    <div class="agent-panel" id="agentHallcheck">
+                        <p class="agent-hint">
+                            <i class="fas fa-shield-halved"></i>
+                            多维幻觉检测：NLI蕴含验证 + 世界状态一致性检查
+                        </p>
+                        <div class="agent-input-group">
+                            <label>待检测文本</label>
+                            <textarea id="hallcheckText" rows="4" placeholder="粘贴要检测的文本，或留空使用编辑器内容..."></textarea>
+                        </div>
+                        <button class="btn btn-primary btn-block" onclick="App.runHallucinationCheck()">
+                            <i class="fas fa-shield-halved"></i> 检测幻觉
+                        </button>
+                        <div class="guard-status" id="guardStatus" style="display:none;">
+                            <div class="guard-status-icon"><span class="pulse-dot"></span></div>
+                            <span id="guardStatusText">检测中...</span>
+                        </div>
+                        <div class="hallcheck-results" id="hallcheckResults"></div>
+                        <div class="hallucination-guard-toggle" style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px;">
+                            <label class="toggle-label">
+                                <input type="checkbox" id="hallucinationGuardToggle" checked>
+                                <span class="toggle-switch"></span>
+                                <span>执笔者自动幻觉防护</span>
+                            </label>
+                            <p class="agent-hint" style="margin-top:4px;">启用后，执笔者生成的文本将自动进行幻觉检测，发现矛盾则重试（最多3次）</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Agent 输出区域 -->
+                <div class="agent-output">
+                    <div class="agent-output-header">
+                        <span><i class="fas fa-terminal"></i> 输出</span>
+                        <div>
+                            <button class="btn btn-xs btn-ghost" onclick="App.applyAgentOutput()" title="应用到编辑器">
+                                <i class="fas fa-paste"></i>
+                            </button>
+                            <button class="btn btn-xs btn-ghost" onclick="App.clearAgentOutput()" title="清空">
+                                <i class="fas fa-trash"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="agent-output-content" id="agentOutput"></div>
+                </div>
+            </div>
+
+            <!-- 记忆面板 -->
+            <div class="panel-content tab-content" id="tabMemory">
+                <!-- 三层记忆状态 -->
+                <div class="memory-section">
+                    <h4><i class="fas fa-layer-group"></i> 记忆状态</h4>
+                    <div class="memory-tiers" id="memoryTiers">
+                        <div class="memory-tier" id="tier1Status">
+                            <span class="tier-badge tier-1">T1</span>
+                            <span class="tier-label">工作记忆</span>
+                            <span class="tier-value" id="tier1Value">-</span>
+                        </div>
+                        <div class="memory-tier" id="tier2Status">
+                            <span class="tier-badge tier-2">T2</span>
+                            <span class="tier-label">滚动摘要</span>
+                            <span class="tier-value" id="tier2Value">-</span>
+                        </div>
+                        <div class="memory-tier" id="tier3Status">
+                            <span class="tier-badge tier-3">T3</span>
+                            <span class="tier-label">向量RAG</span>
+                            <span class="tier-value" id="tier3Value">-</span>
+                        </div>
+                    </div>
+                    <button class="btn btn-xs btn-primary" onclick="App.buildVectorIndex()" style="margin-top:6px;">
+                        <i class="fas fa-database"></i> 构建向量索引
+                    </button>
+                </div>
+
+                <div class="memory-section">
+                    <h4><i class="fas fa-user-clock"></i> 人物提醒</h4>
+                    <div class="panel-toolbar">
+                        <button class="btn btn-xs btn-primary" onclick="App.refreshCharacterHistory('node')">
+                            <i class="fas fa-rotate"></i> 刷新当前章节
+                        </button>
+                        <button class="btn btn-xs btn-ghost" onclick="App.refreshCharacterHistory('book')">
+                            <i class="fas fa-arrows-rotate"></i> 回填全书
+                        </button>
+                        <button class="btn btn-xs btn-ghost" onclick="App.addCharacterHistory()">
+                            <i class="fas fa-plus"></i> 手工记录
+                        </button>
+                    </div>
+                    <div class="memory-helper-text">系统会根据当前章节内容自动识别人物，并提醒其性格、已发生事件与未回收伏笔。</div>
+                    <div id="characterReminderList" class="character-reminder-list"></div>
+                </div>
+
+                <div class="memory-section">
+                    <h4><i class="fas fa-chart-line"></i> 情绪张力曲线</h4>
+                    <div class="panel-toolbar">
+                        <button class="btn btn-xs btn-primary" onclick="App.loadTensionDiagnostics()">
+                            <i class="fas fa-wave-square"></i> 刷新诊断
+                        </button>
+                    </div>
+                    <div class="tension-summary" id="tensionSummary">尚未诊断</div>
+                    <div class="tension-chart" id="tensionChart"></div>
+                    <div class="tension-warnings" id="tensionWarnings"></div>
+                </div>
+
+                <div class="memory-section">
+                    <h4><i class="fas fa-scroll"></i> 章节摘要</h4>
+                    <div id="summaryList" class="summary-list"></div>
+                    <button class="btn btn-xs btn-primary" onclick="App.generateSummary()">
+                        <i class="fas fa-wand-magic-sparkles"></i> 为当前章节生成摘要
+                    </button>
+                </div>
+
+                <div class="memory-section">
+                    <h4><i class="fas fa-search"></i> 向量检索</h4>
+                    <div class="search-box">
+                        <input type="text" id="vectorSearch" placeholder="输入查询文本..."
+                               onkeydown="if(event.key==='Enter') App.vectorSearch()">
+                        <button class="btn btn-xs btn-primary" onclick="App.vectorSearch()">
+                            <i class="fas fa-search"></i>
+                        </button>
+                    </div>
+                    <div id="vectorResults" class="entity-results"></div>
+                </div>
+
+                <div class="memory-section">
+                    <h4><i class="fas fa-search"></i> 实体查询</h4>
+                    <div class="search-box">
+                        <input type="text" id="entitySearch" placeholder="输入人名/地名查询..."
+                               onkeydown="if(event.key==='Enter') App.lookupEntity()">
+                        <button class="btn btn-xs btn-primary" onclick="App.lookupEntity()">
+                            <i class="fas fa-search"></i>
+                        </button>
+                    </div>
+                    <div id="entityResults" class="entity-results"></div>
+                </div>
+            </div>
+        </aside>
+    </main>
+
+    <!-- ========== 模态框：设置 ========== -->
+    <div class="modal-overlay" id="settingsModal" style="display:none;">
+        <div class="modal modal-lg">
+            <div class="modal-header">
+                <h3><i class="fas fa-cog"></i> 设置中心</h3>
+                <button class="btn btn-ghost modal-close" onclick="App.closeSettings()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="settings-tabs">
+                    <button class="settings-tab active" onclick="App.switchSettingsTab('models')">模型管理</button>
+                    <button class="settings-tab" onclick="App.switchSettingsTab('routing')">任务路由</button>
+                    <button class="settings-tab" onclick="App.switchSettingsTab('params')">生成参数</button>
+                    <button class="settings-tab" onclick="App.switchSettingsTab('tokens')">Token 统计</button>
+                </div>
+
+                <!-- 模型管理 -->
+                <div class="settings-content active" id="settingsModels">
+                    <div class="settings-toolbar">
+                        <button class="btn btn-sm btn-primary" onclick="App.addModel()">
+                            <i class="fas fa-plus"></i> 添加模型
+                        </button>
+                    </div>
+                    <div class="model-list" id="modelList"></div>
+                    <!-- 模型编辑表单 -->
+                    <div class="model-form" id="modelForm" style="display:none;">
+                        <h4 id="modelFormTitle">添加模型</h4>
+                        <input type="hidden" id="modelFormId">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>名称</label>
+                                <input type="text" id="modelName" placeholder="如: GPT-4o">
+                            </div>
+                            <div class="form-group">
+                                <label>提供商</label>
+                                <select id="modelProvider">
+                                    <option value="openai">OpenAI / 兼容</option>
+                                    <option value="anthropic">Anthropic</option>
+                                    <option value="ollama">Ollama</option>
+                                    <option value="vllm">vLLM</option>
+                                    <option value="other">其他</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>Base URL</label>
+                            <input type="text" id="modelBaseUrl" placeholder="https://api.openai.com/v1">
+                        </div>
+                        <div class="form-group">
+                            <label>API Key</label>
+                            <input type="password" id="modelApiKey" placeholder="sk-...">
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>模型标识</label>
+                                <input type="text" id="modelModelId" placeholder="gpt-4o">
+                            </div>
+                            <div class="form-group">
+                                <label>最大上下文</label>
+                                <input type="number" id="modelMaxCtx" value="8192">
+                            </div>
+                        </div>
+                        <div class="form-actions">
+                            <button class="btn btn-primary" onclick="App.saveModel()">保存</button>
+                            <button class="btn btn-ghost" onclick="App.cancelModelForm()">取消</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 任务路由 -->
+                <div class="settings-content" id="settingsRouting">
+                    <p class="settings-hint">为不同的 Agent 角色分配专用模型（如：推理型用于规划，文学型用于创作）</p>
+                    <div class="routing-grid" id="routingGrid"></div>
+                    <button class="btn btn-primary" onclick="App.saveRouting()">
+                        <i class="fas fa-save"></i> 保存路由配置
+                    </button>
+                </div>
+
+                <!-- 生成参数 -->
+                <div class="settings-content" id="settingsParams">
+                    <div class="param-grid">
+                        <div class="param-item">
+                            <label>Temperature <span class="param-value" id="tempValue">0.70</span></label>
+                            <input type="range" id="paramTemp" min="0" max="2" step="0.05" value="0.7"
+                                   oninput="document.getElementById('tempValue').textContent=parseFloat(this.value).toFixed(2)">
+                            <div class="param-desc">越高越有创意，越低越稳定</div>
+                        </div>
+                        <div class="param-item">
+                            <label>Top-P <span class="param-value" id="topPValue">0.90</span></label>
+                            <input type="range" id="paramTopP" min="0" max="1" step="0.05" value="0.9"
+                                   oninput="document.getElementById('topPValue').textContent=parseFloat(this.value).toFixed(2)">
+                        </div>
+                        <div class="param-item">
+                            <label>Presence Penalty <span class="param-value" id="ppValue">0.00</span></label>
+                            <input type="range" id="paramPP" min="-2" max="2" step="0.1" value="0"
+                                   oninput="document.getElementById('ppValue').textContent=parseFloat(this.value).toFixed(2)">
+                        </div>
+                        <div class="param-item">
+                            <label>Frequency Penalty <span class="param-value" id="fpValue">0.00</span></label>
+                            <input type="range" id="paramFP" min="-2" max="2" step="0.1" value="0"
+                                   oninput="document.getElementById('fpValue').textContent=parseFloat(this.value).toFixed(2)">
+                        </div>
+                        <div class="param-item">
+                            <label>Max Tokens <span class="param-value" id="mtValue">2000</span></label>
+                            <input type="range" id="paramMT" min="100" max="16000" step="100" value="2000"
+                                   oninput="document.getElementById('mtValue').textContent=this.value">
+                        </div>
+                    </div>
+                    <button class="btn btn-primary" onclick="App.saveGenParams()">
+                        <i class="fas fa-save"></i> 保存参数
+                    </button>
+                </div>
+
+                <!-- Token统计 -->
+                <div class="settings-content" id="settingsTokens">
+                    <div class="token-stats" id="tokenStats"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== 模态框：新建书籍 ========== -->
+    <div class="modal-overlay" id="newBookModal" style="display:none;">
+        <div class="modal">
+            <div class="modal-header">
+                <h3><i class="fas fa-book"></i> 新建书籍</h3>
+                <button class="btn btn-ghost modal-close" onclick="App.closeNewBookDialog()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>书名</label>
+                    <input type="text" id="newBookTitle" placeholder="我的小说">
+                </div>
+                <div class="form-group">
+                    <label>简介</label>
+                    <textarea id="newBookDesc" rows="3" placeholder="简要描述..."></textarea>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>作者</label>
+                        <input type="text" id="newBookAuthor" placeholder="笔名">
+                    </div>
+                    <div class="form-group">
+                        <label>类型</label>
+                        <input type="text" id="newBookGenre" placeholder="玄幻/都市/科幻...">
+                    </div>
+                </div>
+                <div class="form-actions">
+                    <button class="btn btn-primary" onclick="App.createBook()">创建</button>
+                    <button class="btn btn-ghost" onclick="App.closeNewBookDialog()">取消</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== 模态框：Lorebook 编辑 ========== -->
+    <div class="modal-overlay" id="lorebookModal" style="display:none;">
+        <div class="modal">
+            <div class="modal-header">
+                <h3 id="lorebookModalTitle"><i class="fas fa-book-atlas"></i> 新建设定</h3>
+                <button class="btn btn-ghost modal-close" onclick="App.closeLorebookModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="loreEntryId">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>名称</label>
+                        <input type="text" id="loreName" placeholder="角色/地点名称">
+                    </div>
+                    <div class="form-group">
+                        <label>分类</label>
+                        <select id="loreCategory">
+                            <option value="character">角色</option>
+                            <option value="location">地点</option>
+                            <option value="item">物品</option>
+                            <option value="faction">派系</option>
+                            <option value="law">法则</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>简述</label>
+                    <input type="text" id="loreDesc" placeholder="简要描述">
+                </div>
+                <div class="form-group">
+                    <label>触发关键词 <small>(逗号分隔，支持正则)</small></label>
+                    <input type="text" id="loreKeywords" placeholder="关键词1,关键词2">
+                </div>
+                <div class="form-group">
+                    <label>详情设定</label>
+                    <textarea id="loreContent" rows="6" placeholder="详细的设定描述..."></textarea>
+                </div>
+                <div class="form-actions">
+                    <button class="btn btn-primary" onclick="App.saveLorebookEntry()">保存</button>
+                    <button class="btn btn-ghost" onclick="App.closeLorebookModal()">取消</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== 模态框：Diff 对比 ========== -->
+    <div class="modal-overlay" id="diffModal" style="display:none;">
+        <div class="modal modal-lg">
+            <div class="modal-header">
+                <h3><i class="fas fa-code-compare"></i> 文本对比</h3>
+                <button class="btn btn-ghost modal-close" onclick="App.closeDiff()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="diff-view" id="diffView"></div>
+                <div class="form-actions">
+                    <button class="btn btn-primary" onclick="App.acceptDiff()">接受新版本</button>
+                    <button class="btn btn-ghost" onclick="App.closeDiff()">保持原文</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== 模态框：导出菜单 ========== -->
+    <div class="modal-overlay" id="exportModal" style="display:none;">
+        <div class="modal modal-sm">
+            <div class="modal-header">
+                <h3><i class="fas fa-file-export"></i> 导出</h3>
+                <button class="btn btn-ghost modal-close" onclick="App.closeExportMenu()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="export-options">
+                    <button class="export-btn" onclick="App.doExport('markdown')">
+                        <i class="fab fa-markdown"></i>
+                        <span>Markdown</span>
+                    </button>
+                    <button class="export-btn" onclick="App.doExport('txt')">
+                        <i class="fas fa-file-lines"></i>
+                        <span>TXT 纯文本</span>
+                    </button>
+                    <button class="export-btn" onclick="App.doExport('epub')">
+                        <i class="fas fa-book-open"></i>
+                        <span>EPUB 电子书</span>
+                    </button>
+                    <button class="export-btn" onclick="App.doExport('json')">
+                        <i class="fas fa-database"></i>
+                        <span>JSON 工作空间</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== 实体关系编辑模态框 ========== -->
+    <div class="modal-overlay" id="relationModal" style="display:none;">
+        <div class="modal">
+            <div class="modal-header">
+                <h3><i class="fas fa-diagram-project"></i> 实体关系</h3>
+                <button class="btn btn-ghost modal-close" onclick="App.closeRelationModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>来源实体</label>
+                        <input type="text" id="relSource" placeholder="角色A">
+                    </div>
+                    <div class="form-group">
+                        <label>目标实体</label>
+                        <input type="text" id="relTarget" placeholder="角色B">
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>关系类型</label>
+                        <select id="relType">
+                            <option value="好感度">好感度</option>
+                            <option value="存活状态">存活状态</option>
+                            <option value="当前位置">当前位置</option>
+                            <option value="从属关系">从属关系</option>
+                            <option value="敌对关系">敌对关系</option>
+                            <option value="同盟关系">同盟关系</option>
+                            <option value="自定义">自定义</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>值</label>
+                        <input type="text" id="relValue" placeholder="如: 80, 存活, 京城">
+                    </div>
+                </div>
+                <div class="form-actions">
+                    <button class="btn btn-primary" onclick="App.saveRelation()">保存</button>
+                    <button class="btn btn-ghost" onclick="App.closeRelationModal()">取消</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== 认证模态框 ========== -->
+    <div class="modal-overlay" id="authModal" style="display:none;">
+        <div class="modal modal-sm">
+            <div class="modal-header">
+                <h3><i class="fas fa-user-lock"></i> 登录账号</h3>
+                <button class="btn btn-ghost modal-close" onclick="App.cancelAuthDialog()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="settings-hint">账号用于隔离你的书籍、模型配置和 API Key。</p>
+                <div class="form-group">
+                    <label>邮箱</label>
+                    <input type="email" id="authEmail" placeholder="you@example.com">
+                </div>
+                <div class="form-group">
+                    <label>密码</label>
+                    <input type="password" id="authPassword" placeholder="至少6位">
+                </div>
+                <div class="form-actions">
+                    <button class="btn btn-primary" onclick="App.submitAuth('login')">登录</button>
+                    <button class="btn btn-accent" onclick="App.submitAuth('register')">注册</button>
+                    <button class="btn btn-ghost" onclick="App.cancelAuthDialog()">取消</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <button class="btn btn-sm btn-primary focus-exit-btn" id="focusExitBtn" onclick="App.toggleFocusMode()">
+        <i class="fas fa-compress"></i> 退出纯净模式
+    </button>
+
+    <!-- Toast 通知 -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
