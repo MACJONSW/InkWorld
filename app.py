@@ -35,6 +35,18 @@ memory_engine = MemoryEngine(db)
 export_engine = ExportEngine(db)
 db.init_db()
 
+# P0: 注入摘要回调，让 MemoryEngine 在无摘要时自动触发 LLM 摘要
+def _summarizer_callback(book_id, node_id, chapter_title, text):
+    result = agent_orchestrator.run_summarizer({
+        'book_id': book_id,
+        'node_id': node_id,
+        'chapter_title': chapter_title,
+        'text': text
+    })
+    return result.get('summary', '')
+
+memory_engine.set_summarizer_callback(_summarizer_callback)
+
 JWT_ALGORITHM = 'HS256'
 JWT_EXPIRE_DAYS = 30
 AUTH_WHITELIST = {

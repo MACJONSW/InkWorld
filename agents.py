@@ -411,9 +411,23 @@ class AgentOrchestrator:
 输出JSON格式：
 {
   "summary": "200字以内的章节摘要",
-  "key_events": "关键事件列表（JSON数组）",
-  "character_states": "主要角色在本章结束时的状态变化"
-}"""},
+  "key_events": ["事件1", "事件2"],
+  "character_states": [
+    {
+      "name": "角色名",
+      "emotion": "当前情绪状态",
+      "goal": "当前目标/动机",
+      "relationship_changes": [
+        {"target": "对方角色名", "relation": "关系类型", "change": "变化描述"}
+      ]
+    }
+  ],
+  "characters_mentioned": ["角色名1", "角色名2"]
+}
+
+说明：
+- character_states 中为每个主要出场角色分别列出情绪、目标和关系变化
+- characters_mentioned 列出本章所有出场的人物名（包括仅提及的）"""},
             {"role": "user", "content": f"章节标题：{chapter_title}\n\n章节正文：\n{text[:6000]}"}
         ]
 
@@ -429,7 +443,47 @@ class AgentOrchestrator:
                 'key_events': ''
             })
 
+            # 自动将新发现的角色回写 Lorebook
+            self._auto_register_characters(book_id, result)
+
         return {'summary': result}
+
+    def _auto_register_characters(self, book_id, summary_raw):
+        """从 summarizer 返回的 characters_mentioned 中发现新角色并自动创建 Lorebook 条目"""
+        import re as _re
+        try:
+            match = _re.search(r'\{[\s\S]*\}', summary_raw if isinstance(summary_raw, str) else '')
+            if not match:
+                return
+            payload = json.loads(match.group())
+            mentioned = payload.get('characters_mentioned', [])
+            if not isinstance(mentioned, list) or not mentioned:
+                return
+            existing = self.db.get_lorebook_entries(book_id)
+            existing_names = set()
+            for e in existing:
+                if e.get('category') == 'character':
+                    existing_names.add(e.get('name', '').strip().lower())
+                    for kw in (e.get('keywords', '') or '').split(','):
+                        kw = kw.strip().lower()
+                        if kw:
+                            existing_names.add(kw)
+            for name in mentioned:
+                name = (name or '').strip()
+                if not name or len(name) < 2 or name.lower() in existing_names:
+                    continue
+                self.db.add_lorebook_entry({
+                    'book_id': book_id,
+                    'name': name,
+                    'category': 'character',
+                    'description': f'由摘要自动发现的角色',
+                    'content': f'角色 {name}，由章节摘要自动识别。请补充设定。',
+                    'keywords': name,
+                    'enabled': True
+                })
+                existing_names.add(name.lower())
+        except Exception:
+            pass
 
     # ============== 智能续写 (Smart Continuation) ==============
 

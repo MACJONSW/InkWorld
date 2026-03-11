@@ -9,6 +9,7 @@ import json
 import math
 import os
 import hashlib
+import logging
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -20,6 +21,22 @@ try:
 except ImportError:
     HAS_FAISS = False
 
+# 可选 jieba 中文分词
+try:
+    import jieba
+    HAS_JIEBA = True
+except ImportError:
+    HAS_JIEBA = False
+
+# 可选 BM25 检索
+try:
+    from rank_bm25 import BM25Okapi
+    HAS_BM25 = True
+except ImportError:
+    HAS_BM25 = False
+
+logger = logging.getLogger(__name__)
+
 
 class MemoryEngine:
     """三层记忆引擎"""
@@ -28,10 +45,35 @@ class MemoryEngine:
         self.db = db
         self._faiss_indices = {}  # book_id -> faiss.IndexFlatIP
         self._faiss_chunks = {}   # book_id -> list of chunk dicts
-        self._faiss_dim = 128     # TF-IDF降维维度
+        self._bm25_indices = {}   # book_id -> BM25Okapi
+        self._faiss_dim = 512     # TF-IDF 降维维度（从 128 提升到 512）
         self._vectorizer = None
         self._chunk_size = 500    # 向量切片字符数
         self._chunk_overlap = 100 # 切片重叠
+        self._summarizer_callback = None  # (book_id, node_id, chapter_title, text) -> summary_text
+        self._jieba_user_dict_loaded = {}  # book_id -> bool
+
+    def set_summarizer_callback(self, callback):
+        """注入摘要生成回调，签名: callback(book_id, node_id, chapter_title, text) -> summary_text"""
+        self._summarizer_callback = callback
+
+    # ------ jieba 动态词典 ------
+
+    def _ensure_jieba_dict(self, book_id):
+        """从 Lorebook 动态构建 jieba 自定义词典"""
+        if not HAS_JIEBA or self._jieba_user_dict_loaded.get(book_id):
+            return
+        for entry in self._character_entries(book_id):
+            for term in self._character_terms(entry):
+                if len(term) >= 2:
+                    jieba.add_word(term, freq=99999, tag='nr')
+        self._jieba_user_dict_loaded[book_id] = True
+
+    def _tokenize(self, text):
+        """使用 jieba 分词（如可用），否则回退到字符级切分"""
+        if HAS_JIEBA:
+            return list(jieba.cut(text))
+        return list(text)
 
     # =================================================================
     #  Tier 1: 工作记忆 (Working Memory)
@@ -89,20 +131,32 @@ class MemoryEngine:
         return chunks
 
     def _build_tfidf_vectors(self, texts):
-        """使用TF-IDF为文本列表构建向量"""
+        """使用 TF-IDF 为文本列表构建向量（支持 jieba 分词）"""
         if not texts:
             return np.array([])
-        vectorizer = TfidfVectorizer(
-            token_pattern=r'(?u)\b\w+\b',
-            max_features=self._faiss_dim,
-            sublinear_tf=True
-        )
-        tfidf_matrix = vectorizer.fit_transform(texts)
+        if HAS_JIEBA:
+            # jieba 分词预处理，空格拼接后由 TfidfVectorizer 按空格 tokenize
+            tokenized = [' '.join(jieba.cut(t)) for t in texts]
+            vectorizer = TfidfVectorizer(
+                token_pattern=r'(?u)\b\w+\b',
+                max_features=self._faiss_dim,
+                sublinear_tf=True
+            )
+            tfidf_matrix = vectorizer.fit_transform(tokenized)
+        else:
+            vectorizer = TfidfVectorizer(
+                token_pattern=r'(?u)\b\w+\b',
+                max_features=self._faiss_dim,
+                sublinear_tf=True
+            )
+            tfidf_matrix = vectorizer.fit_transform(texts)
         self._vectorizer = vectorizer
         return tfidf_matrix.toarray().astype('float32')
 
     def vectorize_book(self, book_id):
-        """为整本书建立向量索引（Tier 3 构建）"""
+        """为整本书建立向量索引（Tier 3 构建 + BM25）"""
+        self._ensure_jieba_dict(book_id)
+
         # 收集所有文本：lorebook + 摘要 + 节点内容
         all_chunks = []
 
@@ -169,51 +223,77 @@ class MemoryEngine:
             self._faiss_indices[book_id] = vectors
             self._faiss_chunks[book_id] = all_chunks
 
-        return {'status': 'ok', 'chunk_count': len(all_chunks), 'has_faiss': HAS_FAISS}
+        # BM25 索引
+        if HAS_BM25:
+            tokenized_corpus = [self._tokenize(t) for t in texts]
+            self._bm25_indices[book_id] = BM25Okapi(tokenized_corpus)
+
+        return {'status': 'ok', 'chunk_count': len(all_chunks), 'has_faiss': HAS_FAISS, 'has_bm25': HAS_BM25}
 
     def vector_retrieve(self, book_id, query, top_k=5):
-        """向量检索：返回与query最相关的top_k个文本块"""
+        """混合检索：TF-IDF/FAISS + BM25（RRF 融合排序）"""
         if book_id not in self._faiss_chunks or not self._faiss_chunks[book_id]:
-            # 尝试自动建立索引
             self.vectorize_book(book_id)
 
         chunks = self._faiss_chunks.get(book_id, [])
         if not chunks:
             return []
 
-        # 构建查询向量
+        # ---- TF-IDF 向量检索 ----
         texts = [c['text'] for c in chunks]
         texts.append(query)
         vectors = self._build_tfidf_vectors(texts)
-        if len(vectors) == 0:
-            return []
 
-        query_vec = vectors[-1:].astype('float32')
-        doc_vecs = vectors[:-1].astype('float32')
+        tfidf_ranking = {}  # idx -> rank (0-based)
+        if len(vectors) > 0:
+            query_vec = vectors[-1:].astype('float32')
+            doc_vecs = vectors[:-1].astype('float32')
 
-        if HAS_FAISS and book_id in self._faiss_indices and isinstance(self._faiss_indices[book_id], faiss.Index):
-            index = self._faiss_indices[book_id]
-            faiss.normalize_L2(query_vec)
-            scores, indices = index.search(query_vec, min(top_k, len(chunks)))
-            results = []
-            for score, idx in zip(scores[0], indices[0]):
-                if idx >= 0 and idx < len(chunks):
-                    r = dict(chunks[idx])
-                    r['score'] = round(float(score), 4)
-                    results.append(r)
-            return results
-        else:
-            # Numpy fallback
-            from sklearn.metrics.pairwise import cosine_similarity as cos_sim
-            sims = cos_sim(query_vec, doc_vecs)[0]
-            top_indices = np.argsort(sims)[::-1][:top_k]
-            results = []
-            for idx in top_indices:
-                if sims[idx] > 0.05:
-                    r = dict(chunks[idx])
-                    r['score'] = round(float(sims[idx]), 4)
-                    results.append(r)
-            return results
+            if HAS_FAISS and book_id in self._faiss_indices and isinstance(self._faiss_indices[book_id], faiss.Index):
+                index = self._faiss_indices[book_id]
+                faiss.normalize_L2(query_vec)
+                n = min(top_k * 3, len(chunks))
+                scores, indices = index.search(query_vec, n)
+                for rank, (score, idx) in enumerate(zip(scores[0], indices[0])):
+                    if 0 <= idx < len(chunks) and score > 0.01:
+                        tfidf_ranking[int(idx)] = rank
+            else:
+                from sklearn.metrics.pairwise import cosine_similarity as cos_sim
+                sims = cos_sim(query_vec, doc_vecs)[0]
+                sorted_indices = np.argsort(sims)[::-1][:top_k * 3]
+                for rank, idx in enumerate(sorted_indices):
+                    if sims[idx] > 0.05:
+                        tfidf_ranking[int(idx)] = rank
+
+        # ---- BM25 检索 ----
+        bm25_ranking = {}  # idx -> rank
+        if HAS_BM25 and book_id in self._bm25_indices:
+            query_tokens = self._tokenize(query)
+            bm25_scores = self._bm25_indices[book_id].get_scores(query_tokens)
+            sorted_bm25 = np.argsort(bm25_scores)[::-1][:top_k * 3]
+            for rank, idx in enumerate(sorted_bm25):
+                if bm25_scores[idx] > 0:
+                    bm25_ranking[int(idx)] = rank
+
+        # ---- RRF 融合 ----
+        k = 60  # RRF 常数
+        all_idx = set(tfidf_ranking.keys()) | set(bm25_ranking.keys())
+        rrf_scores = {}
+        for idx in all_idx:
+            score = 0.0
+            if idx in tfidf_ranking:
+                score += 1.0 / (k + tfidf_ranking[idx])
+            if idx in bm25_ranking:
+                score += 1.0 / (k + bm25_ranking[idx])
+            rrf_scores[idx] = score
+
+        sorted_results = sorted(rrf_scores.items(), key=lambda x: -x[1])[:top_k]
+        results = []
+        for idx, score in sorted_results:
+            r = dict(chunks[idx])
+            r['score'] = round(score, 4)
+            results.append(r)
+        return results
 
     def _flatten_tree(self, tree):
         """将树形结构扁平化"""
@@ -303,6 +383,14 @@ class MemoryEngine:
         if not book_id or not text.strip():
             return []
 
+        self._ensure_jieba_dict(book_id)
+
+        # jieba 分词匹配：精确词边界
+        if HAS_JIEBA:
+            tokens = list(jieba.cut(text))
+            tokens_lower = [t.lower() for t in tokens]
+            token_set = set(tokens_lower)
+
         lowered = text.lower()
         mentions = []
         for entry in self._character_entries(book_id):
@@ -314,7 +402,14 @@ class MemoryEngine:
                 if not term:
                     continue
                 term_lower = term.lower()
-                hit_count = lowered.count(term_lower)
+                if HAS_JIEBA:
+                    # jieba 级别精确匹配（分词结果中的完整 token）
+                    hit_count = tokens_lower.count(term_lower)
+                    if hit_count <= 0:
+                        # 回退：子串匹配（多字词可能被分词器拆开）
+                        hit_count = lowered.count(term_lower)
+                else:
+                    hit_count = lowered.count(term_lower)
                 if hit_count <= 0:
                     continue
                 count += hit_count
@@ -511,7 +606,7 @@ class MemoryEngine:
                     parts.append(f"- {state.get('state_type', '')}: {self._short_text(state.get('state_value', ''), 80)}")
         return '\n'.join(parts)
 
-    def _build_history_details(self, chapter_title, summary_payload, source_excerpt, foreshadow_labels):
+    def _build_history_details(self, chapter_title, summary_payload, source_excerpt, foreshadow_labels, character_name=''):
         details = []
         summary_text = summary_payload.get('summary', '')
         if summary_text:
@@ -521,9 +616,36 @@ class MemoryEngine:
             key_events = '；'.join([str(item) for item in key_events if item])
         if key_events:
             details.append(f"关键事件：{self._short_text(str(key_events), 180)}")
+
+        # P2: 结构化角色状态解析
         character_states = summary_payload.get('character_states', '')
-        if character_states:
+        if isinstance(character_states, list) and character_name:
+            # 从结构化数组中提取当前角色的状态
+            for cs in character_states:
+                if not isinstance(cs, dict):
+                    continue
+                cs_name = (cs.get('name') or '').strip()
+                if cs_name.lower() != character_name.lower():
+                    continue
+                state_parts = []
+                if cs.get('emotion'):
+                    state_parts.append(f"情绪：{cs['emotion']}")
+                if cs.get('goal'):
+                    state_parts.append(f"目标：{cs['goal']}")
+                rel_changes = cs.get('relationship_changes', [])
+                if isinstance(rel_changes, list):
+                    for rc in rel_changes[:3]:
+                        if isinstance(rc, dict) and rc.get('target'):
+                            state_parts.append(
+                                f"与{rc['target']}的{rc.get('relation', '关系')}：{rc.get('change', '变化')}"
+                            )
+                if state_parts:
+                    details.append(f"角色状态：{'；'.join(state_parts)}")
+                break
+        elif character_states:
+            # 旧格式回退
             details.append(f"角色状态：{self._short_text(str(character_states), 180)}")
+
         if foreshadow_labels:
             details.append(f"相关伏笔：{'、'.join(foreshadow_labels)}")
         if source_excerpt:
@@ -551,7 +673,17 @@ class MemoryEngine:
         if not mentions:
             return []
 
+        # P0: 无摘要时自动触发摘要生成
         summary_payload = self._parse_summary_payload(summary)
+        if not summary_payload.get('summary') and self._summarizer_callback and len(content) >= 200:
+            try:
+                auto_summary = self._summarizer_callback(book_id, node_id, chapter_title, content)
+                if auto_summary:
+                    summary_payload = self._parse_summary_payload(auto_summary)
+                    logger.info("Auto-generated summary for node %s", node_id)
+            except Exception as e:
+                logger.warning("Auto-summary failed for node %s: %s", node_id, e)
+
         unresolved = self.db.get_foreshadowing(book_id, status='unresolved')
         created = []
 
@@ -574,7 +706,7 @@ class MemoryEngine:
             else:
                 summary_text = f"在《{chapter_title or '未命名章节'}》中出场，相关片段：{self._short_text(source_excerpt, 120)}"
 
-            details = self._build_history_details(chapter_title, summary_payload, source_excerpt, foreshadow_labels[:3])
+            details = self._build_history_details(chapter_title, summary_payload, source_excerpt, foreshadow_labels[:3], character_name=name)
             created.append({
                 'book_id': book_id,
                 'character_name': name,
