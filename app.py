@@ -1175,19 +1175,20 @@ def global_replace(book_id):
             if query not in content:
                 continue
             new_content = content.replace(query, replacement)
+            count = content.count(query)
         else:
-            import re as _re
-            pattern = _re.compile(_re.escape(query), _re.IGNORECASE)
+            pattern = re.compile(re.escape(query), re.IGNORECASE)
             if not pattern.search(content):
                 continue
             new_content = pattern.sub(replacement, content)
+            count = len(pattern.findall(content))
         if new_content != content:
             # Auto-snapshot before replace
             node_book_id = db.get_node_book_id(node['id'])
             db.create_snapshot(node['id'], node_book_id or book_id, content,
                               label=f'替换"{query}"前自动备份', trigger_type='auto')
             db.save_node_content(node['id'], {'content': new_content})
-            replaced_count += new_content.lower().count(replacement.lower()) if replacement else 0
+            replaced_count += count
             affected_nodes.append(node['id'])
     return jsonify({'status': 'ok', 'affected_nodes': len(affected_nodes), 'replaced_count': replaced_count})
 

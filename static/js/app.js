@@ -3090,7 +3090,7 @@ const App = {
                     ` : ''}
                 </div>
                 <div class="timeline-event-actions">
-                    <button class="btn btn-xs btn-ghost" onclick="App.editTimelineEvent('${this.escJs(ev.id)}', ${this.escJs(JSON.stringify(ev)).replace(/'/g, "\\'")})">
+                    <button class="btn btn-xs btn-ghost" onclick="App.editTimelineEvent('${this.escJs(ev.id)}', ${this.escHtml(JSON.stringify(ev))})">
                         <i class="fas fa-pen"></i>
                     </button>
                     <button class="btn btn-xs btn-ghost btn-danger" onclick="App.deleteTimelineEvent('${this.escJs(ev.id)}')">
@@ -3229,7 +3229,7 @@ const App = {
                     <div class="rule-content">${this.escHtml(r.content.substring(0, 120))}${r.content.length > 120 ? '...' : ''}</div>
                 </div>
                 <div class="rule-actions">
-                    <button class="btn btn-xs btn-ghost" onclick="App.editWritingRule('${this.escJs(r.id)}', ${JSON.stringify(r).replace(/'/g, "\\'")})">
+                    <button class="btn btn-xs btn-ghost" onclick="App.editWritingRule('${this.escJs(r.id)}', ${this.escHtml(JSON.stringify(r))})">
                         <i class="fas fa-pen"></i>
                     </button>
                     <button class="btn btn-xs btn-ghost btn-danger" onclick="App.deleteWritingRule('${this.escJs(r.id)}')">
@@ -3346,7 +3346,7 @@ const App = {
             headers: this.authHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({
                 content,
-                label: `手动快照 ${new Date().toLocaleString('zh-CN', { hour12: false }).substring(0, 16)}`,
+                label: `手动快照 ${new Date().toISOString().substring(0, 16).replace('T', ' ')}`,
                 trigger_type: 'manual'
             })
         });

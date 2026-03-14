@@ -392,8 +392,7 @@ severity 等级说明：
         # Parse and enrich validation result with severity grading
         parsed = {'validation': result_text, 'issues_by_severity': {'high': [], 'medium': [], 'low': []}}
         try:
-            import re as _re
-            match = _re.search(r'\{[\s\S]*\}', result_text if isinstance(result_text, str) else '')
+            match = re.search(r'\{[\s\S]*\}', result_text if isinstance(result_text, str) else '')
             if match:
                 payload = json.loads(match.group())
                 issues = payload.get('issues', [])
@@ -1718,8 +1717,7 @@ Hypothesis（假说/待验证文本）：
         result_text = self._call_llm('validator', messages)
         events = []
         try:
-            import re as _re
-            match = _re.search(r'\{[\s\S]*\}', result_text if isinstance(result_text, str) else '')
+            match = re.search(r'\{[\s\S]*\}', result_text if isinstance(result_text, str) else '')
             if match:
                 payload = json.loads(match.group())
                 events = payload.get('events', [])
