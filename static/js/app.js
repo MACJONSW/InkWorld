@@ -2835,8 +2835,718 @@ const App = {
     escJs(str) {
         if (!str) return '';
         return str.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n');
-    }
+    },
+
+    // ==================== 新手引导 & 项目模板 ====================
+
+    showNewBookDialog() {
+        document.getElementById('newBookWithTemplateModal').style.display = 'flex';
+        this.loadTemplates();
+    },
+
+    closeNewBookWithTemplateDialog() {
+        document.getElementById('newBookWithTemplateModal').style.display = 'none';
+    },
+
+    async loadTemplates() {
+        const resp = await fetch('/api/templates', { headers: this.authHeaders() });
+        if (!resp.ok) return;
+        const templates = await resp.json();
+        const grid = document.getElementById('templateGrid');
+        grid.innerHTML = templates.map(t => `
+            <div class="template-card" onclick="App.selectTemplate('${this.escJs(t.id)}', '${this.escJs(t.name)}', '${this.escJs(t.genre)}')">
+                <div class="template-card-icon">${this._templateIcon(t.id)}</div>
+                <div class="template-card-name">${this.escHtml(t.name)}</div>
+                <div class="template-card-desc">${this.escHtml(t.description)}</div>
+            </div>
+        `).join('');
+    },
+
+    _templateIcon(id) {
+        const icons = { fantasy: '⚔️', romance: '💕', mystery: '🔍', scifi: '🚀', blank: '📝' };
+        return icons[id] || '📖';
+    },
+
+    _selectedTemplateId: null,
+
+    selectTemplate(templateId, templateName, defaultGenre) {
+        this._selectedTemplateId = templateId;
+        document.getElementById('templateGrid').style.display = 'none';
+        document.getElementById('templateSelectedForm').style.display = 'block';
+        document.getElementById('templateSelectedName').textContent = `模板：${templateName}`;
+        if (defaultGenre) document.getElementById('templateBookGenre').value = defaultGenre;
+        document.getElementById('templateBookTitle').focus();
+    },
+
+    resetTemplateSelection() {
+        this._selectedTemplateId = null;
+        document.getElementById('templateGrid').style.display = 'grid';
+        document.getElementById('templateSelectedForm').style.display = 'none';
+    },
+
+    async createBookFromTemplate() {
+        const title = document.getElementById('templateBookTitle').value.trim() || '未命名小说';
+        const author = document.getElementById('templateBookAuthor').value.trim();
+        const genre = document.getElementById('templateBookGenre').value.trim();
+        const description = document.getElementById('templateBookDesc').value.trim();
+        const templateId = this._selectedTemplateId || 'blank';
+
+        const resp = await fetch('/api/books/from-template', {
+            method: 'POST',
+            headers: this.authHeaders({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify({ template_id: templateId, title, author, genre, description })
+        });
+        if (!resp.ok) { this.showToast('创建失败', 'error'); return; }
+        const data = await resp.json();
+        this.closeNewBookWithTemplateDialog();
+        await this.loadBooks();
+        this.switchBook(data.id);
+        this.showToast(`📚 书籍已创建，模板：${templateId}`, 'success');
+    },
+
+    // ==================== 全局搜索与替换 ====================
+
+    showGlobalSearch() {
+        if (!this.currentBookId) { this.showToast('请先选择书籍', 'warning'); return; }
+        document.getElementById('globalSearchModal').style.display = 'flex';
+        document.getElementById('globalSearchQuery').focus();
+        document.getElementById('globalSearchResults').innerHTML = '';
+        document.getElementById('globalReplaceBtn').disabled = true;
+    },
+
+    closeGlobalSearch() {
+        document.getElementById('globalSearchModal').style.display = 'none';
+    },
+
+    async doGlobalSearch() {
+        const query = document.getElementById('globalSearchQuery').value.trim();
+        if (!query) return;
+        const caseSensitive = document.getElementById('searchCaseSensitive').checked;
+        const resp = await fetch(`/api/search/${this.currentBookId}`, {
+            method: 'POST',
+            headers: this.authHeaders({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify({ query, case_sensitive: caseSensitive })
+        });
+        if (!resp.ok) { this.showToast('搜索失败', 'error'); return; }
+        const data = await resp.json();
+        this._searchResults = data.results;
+        this._renderSearchResults(data.results, data.total);
+        const hasReplace = document.getElementById('globalReplaceText').value.trim().length > 0;
+        document.getElementById('globalReplaceBtn').disabled = !data.total || !hasReplace;
+    },
+
+    _searchResults: [],
+
+    _renderSearchResults(results, total) {
+        const container = document.getElementById('globalSearchResults');
+        if (!results.length) {
+            container.innerHTML = '<p class="agent-hint">未找到匹配结果</p>';
+            return;
+        }
+        container.innerHTML = `<p class="settings-hint">共找到 <strong>${total}</strong> 处匹配，涉及 <strong>${results.length}</strong> 个章节</p>` +
+            results.map(r => `
+                <div class="search-result-item" onclick="App.jumpToNode('${this.escJs(r.node_id)}')">
+                    <div class="search-result-title">
+                        <i class="fas fa-file-lines"></i> ${this.escHtml(r.title)}
+                        <span class="badge badge-info">${r.match_count} 处</span>
+                    </div>
+                    ${r.matches.slice(0, 3).map(m => `
+                        <div class="search-result-snippet">...${this.escHtml(m.snippet)}...</div>
+                    `).join('')}
+                </div>
+            `).join('');
+    },
+
+    async jumpToNode(nodeId) {
+        await this.selectNode(nodeId);
+        this.closeGlobalSearch();
+    },
+
+    async doGlobalReplace() {
+        const query = document.getElementById('globalSearchQuery').value.trim();
+        const replacement = document.getElementById('globalReplaceText').value;
+        const caseSensitive = document.getElementById('searchCaseSensitive').checked;
+        if (!query) return;
+        if (!confirm(`确定要将所有"${query}"替换为"${replacement}"？此操作不可直接撤销（会自动创建快照）。`)) return;
+        const resp = await fetch(`/api/search/${this.currentBookId}/replace`, {
+            method: 'POST',
+            headers: this.authHeaders({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify({ query, replacement, case_sensitive: caseSensitive })
+        });
+        if (!resp.ok) { this.showToast('替换失败', 'error'); return; }
+        const data = await resp.json();
+        this.showToast(`✅ 替换完成：${data.affected_nodes} 个章节，已创建自动快照`, 'success');
+        this.closeGlobalSearch();
+        if (this.currentNodeId) this.selectNode(this.currentNodeId);
+    },
+
+    // ==================== 回收站 ====================
+
+    showRecycleBin() {
+        if (!this.currentBookId) { this.showToast('请先选择书籍', 'warning'); return; }
+        document.getElementById('recycleBinModal').style.display = 'flex';
+        this.loadRecycleBin();
+    },
+
+    closeRecycleBin() {
+        document.getElementById('recycleBinModal').style.display = 'none';
+    },
+
+    async loadRecycleBin() {
+        const resp = await fetch(`/api/recycle-bin/${this.currentBookId}`, {
+            headers: this.authHeaders()
+        });
+        if (!resp.ok) return;
+        const items = await resp.json();
+        const container = document.getElementById('recycleBinList');
+        if (!items.length) {
+            container.innerHTML = '<p class="agent-hint"><i class="fas fa-trash"></i> 回收站为空</p>';
+            return;
+        }
+        container.innerHTML = items.map(item => `
+            <div class="recycle-bin-item">
+                <div class="recycle-bin-info">
+                    <i class="fas fa-file-lines"></i>
+                    <strong>${this.escHtml(item.title)}</strong>
+                    <span class="badge">${item.node_type}</span>
+                    <span class="text-muted" style="font-size:12px;">${item.deleted_at ? item.deleted_at.substring(0,16) : ''}</span>
+                </div>
+                <div class="recycle-bin-actions">
+                    <button class="btn btn-xs btn-primary" onclick="App.restoreDeletedNode('${this.escJs(item.id)}')">
+                        <i class="fas fa-trash-restore"></i> 恢复
+                    </button>
+                    <button class="btn btn-xs btn-danger" onclick="App.purgeDeletedNode('${this.escJs(item.id)}')">
+                        <i class="fas fa-times"></i> 彻底删除
+                    </button>
+                </div>
+            </div>
+        `).join('');
+    },
+
+    async restoreDeletedNode(deletedId) {
+        const resp = await fetch(`/api/recycle-bin/${this.currentBookId}/${deletedId}/restore`, {
+            method: 'POST',
+            headers: this.authHeaders()
+        });
+        if (!resp.ok) { this.showToast('恢复失败', 'error'); return; }
+        this.showToast('✅ 章节已恢复', 'success');
+        this.loadRecycleBin();
+        this.loadTree();
+    },
+
+    async purgeDeletedNode(deletedId) {
+        if (!confirm('确定要永久删除？此操作不可恢复。')) return;
+        const resp = await fetch(`/api/recycle-bin/${this.currentBookId}/${deletedId}`, {
+            method: 'DELETE',
+            headers: this.authHeaders()
+        });
+        if (!resp.ok) { this.showToast('删除失败', 'error'); return; }
+        this.showToast('已永久删除', 'info');
+        this.loadRecycleBin();
+    },
+
+    // ==================== 时间线与事件账本 ====================
+
+    async loadTimeline() {
+        if (!this.currentBookId) return;
+        const eventType = document.getElementById('timelineFilter')?.value || '';
+        const entity = document.getElementById('timelineEntityFilter')?.value.trim() || '';
+        let url = `/api/timeline/${this.currentBookId}`;
+        const params = new URLSearchParams();
+        if (eventType) params.append('event_type', eventType);
+        if (entity) params.append('entity', entity);
+        if (params.toString()) url += '?' + params.toString();
+        const resp = await fetch(url, { headers: this.authHeaders() });
+        if (!resp.ok) return;
+        const events = await resp.json();
+        this._renderTimeline(events);
+    },
+
+    _renderTimeline(events) {
+        const container = document.getElementById('timelineList');
+        if (!events.length) {
+            container.innerHTML = '<p class="agent-hint"><i class="fas fa-info-circle"></i> 暂无时间线事件</p>';
+            return;
+        }
+        const typeIcons = {
+            injury: '🩸', recovery: '💊', location: '📍', relationship: '💬',
+            item: '📦', death: '💀', revelation: '💡', event: '⚡', other: '📌'
+        };
+        container.innerHTML = events.map(ev => `
+            <div class="timeline-event-item">
+                <div class="timeline-event-type">${typeIcons[ev.event_type] || '📌'}</div>
+                <div class="timeline-event-body">
+                    <div class="timeline-event-meta">
+                        <strong>${this.escHtml(ev.entity_name || '?')}</strong>
+                        ${ev.chapter_title ? `<span class="badge">${this.escHtml(ev.chapter_title)}</span>` : ''}
+                    </div>
+                    <div class="timeline-event-desc">${this.escHtml(ev.description)}</div>
+                    ${ev.state_before || ev.state_after ? `
+                        <div class="timeline-event-state">
+                            ${ev.state_before ? `<span class="state-before">${this.escHtml(ev.state_before)}</span>` : ''}
+                            ${ev.state_before && ev.state_after ? ' → ' : ''}
+                            ${ev.state_after ? `<span class="state-after">${this.escHtml(ev.state_after)}</span>` : ''}
+                        </div>
+                    ` : ''}
+                </div>
+                <div class="timeline-event-actions">
+                    <button class="btn btn-xs btn-ghost" onclick="App.editTimelineEvent('${this.escJs(ev.id)}', ${this.escJs(JSON.stringify(ev)).replace(/'/g, "\\'")})">
+                        <i class="fas fa-pen"></i>
+                    </button>
+                    <button class="btn btn-xs btn-ghost btn-danger" onclick="App.deleteTimelineEvent('${this.escJs(ev.id)}')">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                </div>
+            </div>
+        `).join('');
+    },
+
+    addTimelineEvent() {
+        document.getElementById('timelineEventId').value = '';
+        document.getElementById('timelineEntityName').value = '';
+        document.getElementById('timelineEventType').value = 'event';
+        document.getElementById('timelineChapterTitle').value = '';
+        document.getElementById('timelineChapterNumber').value = '0';
+        document.getElementById('timelineDescription').value = '';
+        document.getElementById('timelineStateBefore').value = '';
+        document.getElementById('timelineStateAfter').value = '';
+        document.getElementById('timelineEventModalTitle').innerHTML = '<i class="fas fa-timeline"></i> 添加时间线事件';
+        document.getElementById('timelineEventModal').style.display = 'flex';
+    },
+
+    editTimelineEvent(eventId, eventData) {
+        document.getElementById('timelineEventId').value = eventId;
+        document.getElementById('timelineEntityName').value = eventData.entity_name || '';
+        document.getElementById('timelineEventType').value = eventData.event_type || 'event';
+        document.getElementById('timelineChapterTitle').value = eventData.chapter_title || '';
+        document.getElementById('timelineChapterNumber').value = eventData.chapter_number || 0;
+        document.getElementById('timelineDescription').value = eventData.description || '';
+        document.getElementById('timelineStateBefore').value = eventData.state_before || '';
+        document.getElementById('timelineStateAfter').value = eventData.state_after || '';
+        document.getElementById('timelineEventModalTitle').innerHTML = '<i class="fas fa-timeline"></i> 编辑时间线事件';
+        document.getElementById('timelineEventModal').style.display = 'flex';
+    },
+
+    closeTimelineEventModal() {
+        document.getElementById('timelineEventModal').style.display = 'none';
+    },
+
+    async saveTimelineEvent() {
+        const eventId = document.getElementById('timelineEventId').value;
+        const data = {
+            entity_name: document.getElementById('timelineEntityName').value.trim(),
+            event_type: document.getElementById('timelineEventType').value,
+            chapter_title: document.getElementById('timelineChapterTitle').value.trim(),
+            chapter_number: parseInt(document.getElementById('timelineChapterNumber').value) || 0,
+            description: document.getElementById('timelineDescription').value.trim(),
+            state_before: document.getElementById('timelineStateBefore').value.trim(),
+            state_after: document.getElementById('timelineStateAfter').value.trim(),
+            node_id: this.currentNodeId || '',
+        };
+        if (!data.description && !data.entity_name) {
+            this.showToast('请填写事件描述或涉及角色', 'warning'); return;
+        }
+        const url = eventId
+            ? `/api/timeline/${this.currentBookId}/${eventId}`
+            : `/api/timeline/${this.currentBookId}`;
+        const method = eventId ? 'PUT' : 'POST';
+        const resp = await fetch(url, {
+            method,
+            headers: this.authHeaders({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify(data)
+        });
+        if (!resp.ok) { this.showToast('保存失败', 'error'); return; }
+        this.closeTimelineEventModal();
+        this.loadTimeline();
+        this.showToast('✅ 时间线事件已保存', 'success');
+    },
+
+    async deleteTimelineEvent(eventId) {
+        if (!confirm('确定要删除这条时间线事件？')) return;
+        await fetch(`/api/timeline/${this.currentBookId}/${eventId}`, {
+            method: 'DELETE', headers: this.authHeaders()
+        });
+        this.loadTimeline();
+    },
+
+    async extractTimelineFromChapter() {
+        if (!this.currentNodeId) { this.showToast('请先选择章节', 'warning'); return; }
+        const content = document.getElementById('editorArea')?.innerText || '';
+        if (!content.trim()) { this.showToast('当前章节无内容', 'warning'); return; }
+        this.showToast('正在提取时间线...', 'info');
+        const resp = await fetch('/api/agent/timeline-extract', {
+            method: 'POST',
+            headers: this.authHeaders({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify({
+                text: content,
+                book_id: this.currentBookId,
+                node_id: this.currentNodeId,
+                chapter_title: document.getElementById('editorPath')?.textContent || '',
+                chapter_number: 0,
+            })
+        });
+        if (!resp.ok) { this.showToast('提取失败', 'error'); return; }
+        const data = await resp.json();
+        const count = data.events?.length || 0;
+        this.showToast(`✅ 提取完成：新增 ${count} 条时间线事件`, 'success');
+        this.loadTimeline();
+    },
+
+    // ==================== 创作规则中心 ====================
+
+    async loadWritingRules() {
+        if (!this.currentBookId) return;
+        const ruleType = document.getElementById('rulesTypeFilter')?.value || '';
+        let url = `/api/writing-rules/${this.currentBookId}`;
+        if (ruleType) url += `?type=${encodeURIComponent(ruleType)}`;
+        const resp = await fetch(url, { headers: this.authHeaders() });
+        if (!resp.ok) return;
+        const rules = await resp.json();
+        this._renderWritingRules(rules);
+    },
+
+    _renderWritingRules(rules) {
+        const container = document.getElementById('writingRulesList');
+        if (!rules.length) {
+            container.innerHTML = '<p class="agent-hint"><i class="fas fa-info-circle"></i> 暂无创作规则，添加规则后AI写作时会自动遵守</p>';
+            return;
+        }
+        const typeLabels = {
+            style: '文风', pov: '视角', forbidden: '禁用词',
+            character_voice: '角色语气', format: '格式规范', other: '其他'
+        };
+        container.innerHTML = rules.map(r => `
+            <div class="writing-rule-item ${r.is_active ? '' : 'rule-disabled'}">
+                <div class="rule-toggle">
+                    <input type="checkbox" ${r.is_active ? 'checked' : ''}
+                           onchange="App.toggleWritingRule('${this.escJs(r.id)}', this.checked)">
+                </div>
+                <div class="rule-body">
+                    <div class="rule-header">
+                        <span class="rule-type-badge">${typeLabels[r.rule_type] || r.rule_type}</span>
+                        <strong>${this.escHtml(r.title)}</strong>
+                    </div>
+                    <div class="rule-content">${this.escHtml(r.content.substring(0, 120))}${r.content.length > 120 ? '...' : ''}</div>
+                </div>
+                <div class="rule-actions">
+                    <button class="btn btn-xs btn-ghost" onclick="App.editWritingRule('${this.escJs(r.id)}', ${JSON.stringify(r).replace(/'/g, "\\'")})">
+                        <i class="fas fa-pen"></i>
+                    </button>
+                    <button class="btn btn-xs btn-ghost btn-danger" onclick="App.deleteWritingRule('${this.escJs(r.id)}')">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                </div>
+            </div>
+        `).join('');
+    },
+
+    addWritingRule() {
+        document.getElementById('writingRuleId').value = '';
+        document.getElementById('writingRuleTitle').value = '';
+        document.getElementById('writingRuleType').value = 'style';
+        document.getElementById('writingRuleContent').value = '';
+        document.getElementById('writingRuleModalTitle').innerHTML = '<i class="fas fa-scroll"></i> 添加创作规则';
+        document.getElementById('writingRuleModal').style.display = 'flex';
+    },
+
+    editWritingRule(ruleId, ruleData) {
+        document.getElementById('writingRuleId').value = ruleId;
+        document.getElementById('writingRuleTitle').value = ruleData.title || '';
+        document.getElementById('writingRuleType').value = ruleData.rule_type || 'style';
+        document.getElementById('writingRuleContent').value = ruleData.content || '';
+        document.getElementById('writingRuleModalTitle').innerHTML = '<i class="fas fa-scroll"></i> 编辑创作规则';
+        document.getElementById('writingRuleModal').style.display = 'flex';
+    },
+
+    closeWritingRuleModal() {
+        document.getElementById('writingRuleModal').style.display = 'none';
+    },
+
+    async saveWritingRule() {
+        const ruleId = document.getElementById('writingRuleId').value;
+        const data = {
+            title: document.getElementById('writingRuleTitle').value.trim(),
+            rule_type: document.getElementById('writingRuleType').value,
+            content: document.getElementById('writingRuleContent').value.trim(),
+            is_active: true,
+        };
+        if (!data.title) { this.showToast('请填写规则标题', 'warning'); return; }
+        const url = ruleId
+            ? `/api/writing-rules/${this.currentBookId}/${ruleId}`
+            : `/api/writing-rules/${this.currentBookId}`;
+        const method = ruleId ? 'PUT' : 'POST';
+        const resp = await fetch(url, {
+            method,
+            headers: this.authHeaders({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify(data)
+        });
+        if (!resp.ok) { this.showToast('保存失败', 'error'); return; }
+        this.closeWritingRuleModal();
+        this.loadWritingRules();
+        this.showToast('✅ 创作规则已保存', 'success');
+    },
+
+    async toggleWritingRule(ruleId, isActive) {
+        await fetch(`/api/writing-rules/${this.currentBookId}/${ruleId}`, {
+            method: 'PUT',
+            headers: this.authHeaders({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify({ is_active: isActive })
+        });
+        this.loadWritingRules();
+    },
+
+    async deleteWritingRule(ruleId) {
+        if (!confirm('确定要删除这条规则？')) return;
+        await fetch(`/api/writing-rules/${this.currentBookId}/${ruleId}`, {
+            method: 'DELETE', headers: this.authHeaders()
+        });
+        this.loadWritingRules();
+    },
+
+    // ==================== 快照管理 ====================
+
+    async loadSnapshots() {
+        if (!this.currentNodeId) return;
+        const resp = await fetch(`/api/snapshots/${this.currentNodeId}`, {
+            headers: this.authHeaders()
+        });
+        if (!resp.ok) return;
+        const snapshots = await resp.json();
+        this._renderSnapshots(snapshots);
+    },
+
+    _renderSnapshots(snapshots) {
+        const container = document.getElementById('snapshotsList');
+        if (!snapshots.length) {
+            container.innerHTML = '<p class="agent-hint"><i class="fas fa-info-circle"></i> 暂无快照</p>';
+            return;
+        }
+        container.innerHTML = snapshots.map(s => `
+            <div class="snapshot-item">
+                <div class="snapshot-info">
+                    <div class="snapshot-label">${this.escHtml(s.label || '自动快照')}</div>
+                    <div class="snapshot-meta">
+                        <span class="badge ${s.trigger_type === 'manual' ? 'badge-primary' : 'badge-secondary'}">${s.trigger_type === 'manual' ? '手动' : '自动'}</span>
+                        ${s.word_count ? `${s.word_count} 字` : ''}
+                        · ${s.created_at ? s.created_at.substring(0, 16) : ''}
+                    </div>
+                </div>
+                <button class="btn btn-xs btn-primary" onclick="App.restoreSnapshot('${this.escJs(s.id)}')">
+                    <i class="fas fa-rotate-left"></i> 恢复
+                </button>
+            </div>
+        `).join('');
+    },
+
+    async createManualSnapshot() {
+        if (!this.currentNodeId) { this.showToast('请先选择章节', 'warning'); return; }
+        const content = document.getElementById('editorArea')?.innerText || '';
+        const resp = await fetch(`/api/snapshots/${this.currentNodeId}`, {
+            method: 'POST',
+            headers: this.authHeaders({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify({
+                content,
+                label: `手动快照 ${new Date().toLocaleString('zh-CN', { hour12: false }).substring(0, 16)}`,
+                trigger_type: 'manual'
+            })
+        });
+        if (!resp.ok) { this.showToast('快照失败', 'error'); return; }
+        this.showToast('✅ 快照已创建', 'success');
+        this.loadSnapshots();
+    },
+
+    async restoreSnapshot(snapId) {
+        if (!confirm('确定要恢复到此快照？当前内容将被备份后替换。')) return;
+        const resp = await fetch(`/api/snapshots/${this.currentNodeId}/${snapId}/restore`, {
+            method: 'POST', headers: this.authHeaders()
+        });
+        if (!resp.ok) { this.showToast('恢复失败', 'error'); return; }
+        this.showToast('✅ 已恢复到快照', 'success');
+        this.selectNode(this.currentNodeId);
+        this.loadSnapshots();
+    },
+
+    // ==================== 异步任务中心 ====================
+
+    showTaskCenter() {
+        document.getElementById('taskCenterModal').style.display = 'flex';
+        this.loadTasks();
+    },
+
+    closeTaskCenter() {
+        document.getElementById('taskCenterModal').style.display = 'none';
+    },
+
+    async loadTasks() {
+        const params = new URLSearchParams();
+        if (this.currentBookId) params.append('book_id', this.currentBookId);
+        const resp = await fetch(`/api/tasks?${params}`, { headers: this.authHeaders() });
+        if (!resp.ok) return;
+        const tasks = await resp.json();
+        this._renderTasks(tasks);
+    },
+
+    _renderTasks(tasks) {
+        const container = document.getElementById('taskList');
+        if (!tasks.length) {
+            container.innerHTML = '<p class="agent-hint"><i class="fas fa-tasks"></i> 暂无后台任务</p>';
+            return;
+        }
+        const statusIcons = {
+            pending: '⏳', running: '🔄', completed: '✅', failed: '❌', cancelled: '🚫'
+        };
+        const typeLabels = {
+            vectorize: '构建向量索引',
+            refresh_character_history: '回填人物历史',
+        };
+        container.innerHTML = tasks.map(t => `
+            <div class="task-item task-${t.status}">
+                <div class="task-info">
+                    <span class="task-status-icon">${statusIcons[t.status] || '?'}</span>
+                    <div class="task-details">
+                        <div class="task-type">${typeLabels[t.task_type] || t.task_type}</div>
+                        <div class="task-meta">
+                            <span class="badge badge-${t.status}">${t.status}</span>
+                            ${t.progress && t.total ? `${t.progress}/${t.total}` : ''}
+                            · ${t.updated_at ? t.updated_at.substring(0, 16) : ''}
+                        </div>
+                        ${t.error ? `<div class="task-error text-danger" style="font-size:12px;">${this.escHtml(t.error.substring(0, 100))}</div>` : ''}
+                        ${t.result && t.status === 'completed' ? `<div class="task-result" style="font-size:12px;color:var(--text-muted);">${this.escHtml(t.result.substring(0, 100))}</div>` : ''}
+                    </div>
+                </div>
+                ${['pending', 'running'].includes(t.status) ? `
+                    <button class="btn btn-xs btn-ghost" onclick="App.cancelTask('${this.escJs(t.id)}')">
+                        <i class="fas fa-times"></i> 取消
+                    </button>
+                ` : ''}
+            </div>
+        `).join('');
+    },
+
+    async cancelTask(taskId) {
+        await fetch(`/api/tasks/${taskId}/cancel`, {
+            method: 'POST', headers: this.authHeaders()
+        });
+        this.loadTasks();
+    },
+
+    async buildVectorIndexAsync() {
+        if (!this.currentBookId) { this.showToast('请先选择书籍', 'warning'); return; }
+        const resp = await fetch(`/api/memory/vectorize-async/${this.currentBookId}`, {
+            method: 'POST', headers: this.authHeaders()
+        });
+        if (!resp.ok) { this.showToast('启动失败', 'error'); return; }
+        this.showToast('✅ 向量构建任务已提交到后台', 'success');
+        this.loadTasks();
+    },
+
+    async refreshCharacterHistoryAsync() {
+        if (!this.currentBookId) { this.showToast('请先选择书籍', 'warning'); return; }
+        const resp = await fetch(`/api/character-history/${this.currentBookId}/refresh-async`, {
+            method: 'POST', headers: this.authHeaders()
+        });
+        if (!resp.ok) { this.showToast('启动失败', 'error'); return; }
+        this.showToast('✅ 人物历史回填任务已提交到后台', 'success');
+        this.loadTasks();
+    },
+
+    // Override switchRightTab to load new tab data
+    _origSwitchRightTab: null,
 };
+
+// Patch switchRightTab to load new tab data
+const _origSwitchRightTab = App.switchRightTab.bind(App);
+App.switchRightTab = function(tab) {
+    _origSwitchRightTab(tab);
+    if (tab === 'timeline') App.loadTimeline();
+    if (tab === 'rules') App.loadWritingRules();
+    if (tab === 'snapshots') App.loadSnapshots();
+};
+
+// ==================== CSS for new features ====================
+(function injectStyles() {
+    const style = document.createElement('style');
+    style.textContent = `
+        /* Template grid */
+        .template-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; padding: 4px 0; }
+        .template-card { border: 2px solid var(--border); border-radius: 10px; padding: 16px 12px; text-align: center; cursor: pointer; transition: all 0.2s; }
+        .template-card:hover { border-color: var(--primary); background: var(--bg-hover); }
+        .template-card-icon { font-size: 32px; margin-bottom: 8px; }
+        .template-card-name { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+        .template-card-desc { font-size: 12px; color: var(--text-muted); }
+
+        /* Search results */
+        .search-results-list { max-height: 400px; overflow-y: auto; }
+        .search-result-item { border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; margin-bottom: 8px; cursor: pointer; transition: background 0.2s; }
+        .search-result-item:hover { background: var(--bg-hover); }
+        .search-result-title { font-weight: 600; margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
+        .search-result-snippet { font-size: 12px; color: var(--text-muted); padding: 4px 8px; background: var(--bg-subtle); border-radius: 4px; margin-top: 4px; font-family: monospace; white-space: pre-wrap; word-break: break-all; }
+
+        /* Recycle bin */
+        .recycle-bin-list { max-height: 400px; overflow-y: auto; }
+        .recycle-bin-item { display: flex; align-items: center; justify-content: space-between; border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; margin-bottom: 8px; }
+        .recycle-bin-info { display: flex; align-items: center; gap: 8px; flex: 1; }
+        .recycle-bin-actions { display: flex; gap: 6px; }
+
+        /* Timeline */
+        .timeline-entity-filter { padding: 6px 0; }
+        .timeline-entity-filter input { width: 100%; padding: 5px 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; background: var(--bg); color: var(--text); }
+        .timeline-list { margin-top: 8px; }
+        .timeline-event-item { display: flex; gap: 10px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; align-items: flex-start; }
+        .timeline-event-type { font-size: 20px; flex-shrink: 0; }
+        .timeline-event-body { flex: 1; min-width: 0; }
+        .timeline-event-meta { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+        .timeline-event-desc { font-size: 13px; color: var(--text); }
+        .timeline-event-state { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+        .state-before { color: var(--danger); text-decoration: line-through; }
+        .state-after { color: var(--success); }
+        .timeline-event-actions { display: flex; gap: 4px; flex-shrink: 0; }
+
+        /* Writing rules */
+        .rules-list { margin-top: 8px; }
+        .writing-rule-item { display: flex; gap: 10px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; align-items: flex-start; }
+        .writing-rule-item.rule-disabled { opacity: 0.5; }
+        .rule-toggle { flex-shrink: 0; padding-top: 2px; }
+        .rule-body { flex: 1; min-width: 0; }
+        .rule-header { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+        .rule-type-badge { font-size: 11px; background: var(--primary-light, #e0f0ff); color: var(--primary); padding: 2px 6px; border-radius: 4px; }
+        .rule-content { font-size: 12px; color: var(--text-muted); }
+        .rule-actions { display: flex; gap: 4px; flex-shrink: 0; }
+
+        /* Snapshots */
+        .snapshots-list { margin-top: 8px; }
+        .snapshot-item { display: flex; align-items: center; justify-content: space-between; border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; margin-bottom: 6px; }
+        .snapshot-info { flex: 1; }
+        .snapshot-label { font-weight: 500; font-size: 13px; }
+        .snapshot-meta { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+
+        /* Tasks */
+        .task-list { max-height: 400px; overflow-y: auto; }
+        .task-item { display: flex; align-items: flex-start; justify-content: space-between; border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; margin-bottom: 8px; }
+        .task-info { display: flex; gap: 10px; flex: 1; }
+        .task-status-icon { font-size: 18px; flex-shrink: 0; }
+        .task-type { font-weight: 500; font-size: 13px; }
+        .task-meta { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+        .task-completed { border-left: 3px solid var(--success); }
+        .task-failed { border-left: 3px solid var(--danger); }
+        .task-running { border-left: 3px solid var(--primary); }
+        .badge-completed { background: var(--success-light, #d4edda); color: var(--success); }
+        .badge-failed { background: var(--danger-light, #f8d7da); color: var(--danger); }
+        .badge-running { background: var(--primary-light, #cce5ff); color: var(--primary); }
+        .badge-pending { background: var(--warning-light, #fff3cd); color: #856404; }
+        .badge-cancelled { background: var(--bg-subtle); color: var(--text-muted); }
+
+        /* Misc */
+        .text-muted { color: var(--text-muted); }
+        .text-danger { color: var(--danger); }
+        .btn-danger { background: var(--danger); color: #fff; border-color: var(--danger); }
+        .btn-danger:hover { opacity: 0.85; }
+        .badge-info { background: #cce5ff; color: #004085; font-size: 11px; padding: 2px 6px; border-radius: 4px; }
+        .badge-secondary { background: var(--bg-subtle); color: var(--text-muted); font-size: 11px; padding: 2px 6px; border-radius: 4px; }
+        .badge-primary { background: var(--primary-light, #e0f0ff); color: var(--primary); font-size: 11px; padding: 2px 6px; border-radius: 4px; }
+    `;
+    document.head.appendChild(style);
+})();
 
 // 初始化
 document.addEventListener('DOMContentLoaded', () => App.init());

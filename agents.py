@@ -285,6 +285,11 @@ class AgentOrchestrator:
                     f"【{e['name']}】{e['content'][:200]}" for e in injected[:5]
                 ])
 
+        # 写作规则注入
+        rules_ctx = ""
+        if book_id and hasattr(self.db, 'get_active_writing_rules_text'):
+            rules_ctx = self.db.get_active_writing_rules_text(book_id)
+
         messages = [
             {"role": "system", "content": f"""你是一位才华横溢的小说家。根据给定的场景节拍和上下文，创作生动的长篇小说正文。
 
@@ -296,6 +301,7 @@ class AgentOrchestrator:
 5. 推进情节发展
 6. 直接输出正文内容，不要输出任何标题、标记或解释
 
+{rules_ctx}
 {memory_ctx}
 {character_ctx}
 {inject_text}"""},
@@ -328,10 +334,21 @@ class AgentOrchestrator:
             for r in graph[:20]
         ])
 
+        # 获取时间线事件用于一致性校验
+        timeline_ctx = ""
+        if book_id and hasattr(self.db, 'get_timeline_events'):
+            events = self.db.get_timeline_events(book_id)
+            if events:
+                timeline_ctx = "\n历史事件账本（用于时间线校验）：\n" + "\n".join([
+                    f"- [{ev.get('chapter_title','?')}] {ev.get('entity_name','')}: {ev.get('description','')}"
+                    f" ({ev.get('state_before','')} → {ev.get('state_after','')})"
+                    for ev in events[:30]
+                ])
+
         messages = [
             {"role": "system", "content": f"""你是一位严谨的小说审阅专家。对比设定集与生成的文本，进行以下校验：
 1. OOC检测（角色崩坏）：检查角色行为是否符合设定
-2. 时间线校验：检查事件顺序逻辑
+2. 时间线校验：检查事件顺序逻辑，对照历史事件账本
 3. 设定一致性：检查是否违反世界观设定
 4. 逻辑硬伤：标注不合理的情节
 
@@ -340,8 +357,14 @@ class AgentOrchestrator:
 
 关系图谱：
 {graph_ctx}
+{timeline_ctx}
 
-严格以JSON格式输出检测结果。"""},
+严格以JSON格式输出检测结果。
+
+severity 等级说明：
+- high：严重冲突，强烈建议修改（如角色已死亡却出现）
+- medium：存在矛盾，建议核查（如时间前后不一致）
+- low：轻微提示，作者可自行判断（如风格轻微偏移）"""},
             {"role": "user", "content": f"""请审查以下文本：
 
 {text[:4000]}
@@ -355,15 +378,39 @@ class AgentOrchestrator:
       "severity": "high|medium|low",
       "location": "问题所在的文本片段",
       "description": "问题描述",
-      "suggestion": "修改建议"
+      "suggestion": "修改建议",
+      "can_ignore": true
     }}
   ],
-  "summary": "总体评价"
+  "summary": "总体评价",
+  "passed": true
 }}"""}
         ]
 
-        result = self._call_llm('validator', messages)
-        return {'validation': result}
+        result_text = self._call_llm('validator', messages)
+
+        # Parse and enrich validation result with severity grading
+        parsed = {'validation': result_text, 'issues_by_severity': {'high': [], 'medium': [], 'low': []}}
+        try:
+            import re as _re
+            match = _re.search(r'\{[\s\S]*\}', result_text if isinstance(result_text, str) else '')
+            if match:
+                payload = json.loads(match.group())
+                issues = payload.get('issues', [])
+                for issue in issues:
+                    sev = issue.get('severity', 'low')
+                    if sev in parsed['issues_by_severity']:
+                        parsed['issues_by_severity'][sev].append(issue)
+                parsed['score'] = payload.get('score', 80)
+                parsed['summary'] = payload.get('summary', '')
+                parsed['passed'] = payload.get('passed', len([i for i in issues if i.get('severity') == 'high']) == 0)
+                parsed['high_count'] = len(parsed['issues_by_severity']['high'])
+                parsed['medium_count'] = len(parsed['issues_by_severity']['medium'])
+                parsed['low_count'] = len(parsed['issues_by_severity']['low'])
+        except Exception:
+            pass
+
+        return parsed
 
     # ============== Agent 5: 润色 (Polisher) ==============
 
@@ -1626,3 +1673,56 @@ Hypothesis（假说/待验证文本）：
 
         for chunk in self._call_llm('drafter', messages, stream=True):
             yield chunk
+
+    # ============== 时间线事件提取 ==============
+
+    def run_timeline_extract(self, data):
+        """从章节内容中自动提取时间线事件和状态变更"""
+        text = data.get('text', '')
+        chapter_title = data.get('chapter_title', '')
+        chapter_number = data.get('chapter_number', 0)
+        book_id = data.get('book_id', '')
+
+        lorebook = self.db.get_lorebook_entries(book_id) if book_id else []
+        chars = [e['name'] for e in lorebook if e.get('category') == 'character']
+        char_names = '、'.join(chars[:20]) if chars else '（未设定角色）'
+
+        messages = [
+            {"role": "system", "content": f"""你是一位严谨的小说时间线分析师。从章节内容中提取所有重要事件和状态变更。
+
+已知角色：{char_names}
+
+请严格以JSON格式输出，包含一个 events 数组：
+{{
+  "events": [
+    {{
+      "event_type": "injury|recovery|location|relationship|item|death|revelation|other",
+      "entity_name": "涉及的角色或实体名",
+      "description": "事件描述（50字以内）",
+      "state_before": "变化前的状态（如适用）",
+      "state_after": "变化后的状态",
+      "chapter_title": "{chapter_title}",
+      "chapter_number": {chapter_number},
+      "tags": "关键词标签，逗号分隔"
+    }}
+  ]
+}}
+
+提取规则：
+- 只提取对后续情节有影响的状态变更
+- 角色伤亡、位置变化、关系变化、重要物品得失都要记录
+- 每个事件独立记录，entity_name 填具体角色名"""},
+            {"role": "user", "content": f"章节：{chapter_title}\n\n内容：\n{text[:5000]}"}
+        ]
+
+        result_text = self._call_llm('validator', messages)
+        events = []
+        try:
+            import re as _re
+            match = _re.search(r'\{[\s\S]*\}', result_text if isinstance(result_text, str) else '')
+            if match:
+                payload = json.loads(match.group())
+                events = payload.get('events', [])
+        except Exception:
+            pass
+        return {'events': events, 'raw': result_text}

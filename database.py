@@ -318,6 +318,83 @@ class Database:
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )''')
 
+        # 时间线与事件账本
+        c.execute('''CREATE TABLE IF NOT EXISTS timeline_events (
+            id TEXT PRIMARY KEY,
+            book_id TEXT NOT NULL,
+            node_id TEXT DEFAULT '',
+            chapter_title TEXT DEFAULT '',
+            chapter_number INTEGER DEFAULT 0,
+            event_type TEXT DEFAULT 'event',
+            entity_name TEXT DEFAULT '',
+            description TEXT DEFAULT '',
+            state_before TEXT DEFAULT '',
+            state_after TEXT DEFAULT '',
+            effective_from TEXT DEFAULT '',
+            effective_to TEXT DEFAULT '',
+            tags TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        )''')
+
+        # 内容快照（自动备份）
+        c.execute('''CREATE TABLE IF NOT EXISTS content_snapshots (
+            id TEXT PRIMARY KEY,
+            node_id TEXT NOT NULL,
+            book_id TEXT NOT NULL,
+            content TEXT DEFAULT '',
+            word_count INTEGER DEFAULT 0,
+            label TEXT DEFAULT '',
+            trigger_type TEXT DEFAULT 'auto',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        )''')
+
+        # 回收站（软删除节点）
+        c.execute('''CREATE TABLE IF NOT EXISTS deleted_nodes (
+            id TEXT PRIMARY KEY,
+            original_node_id TEXT NOT NULL,
+            book_id TEXT NOT NULL,
+            parent_id TEXT DEFAULT '',
+            node_type TEXT DEFAULT 'chapter',
+            title TEXT NOT NULL,
+            content TEXT DEFAULT '',
+            word_count INTEGER DEFAULT 0,
+            sort_order INTEGER DEFAULT 0,
+            deleted_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            restore_data TEXT DEFAULT ''
+        )''')
+
+        # 创作规则中心 / 风格圣经
+        c.execute('''CREATE TABLE IF NOT EXISTS writing_rules (
+            id TEXT PRIMARY KEY,
+            book_id TEXT NOT NULL,
+            rule_type TEXT DEFAULT 'style',
+            title TEXT NOT NULL,
+            content TEXT DEFAULT '',
+            is_active INTEGER DEFAULT 1,
+            sort_order INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        )''')
+
+        # 异步任务中心
+        c.execute('''CREATE TABLE IF NOT EXISTS async_tasks (
+            id TEXT PRIMARY KEY,
+            book_id TEXT DEFAULT '',
+            user_id TEXT NOT NULL,
+            task_type TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            progress INTEGER DEFAULT 0,
+            total INTEGER DEFAULT 0,
+            result TEXT DEFAULT '',
+            error TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )''')
+
         # 兼容历史库的字段迁移
         self._ensure_column(conn, 'models', 'user_id', 'TEXT')
         self._ensure_column(conn, 'books', 'user_id', 'TEXT')
@@ -1085,6 +1162,361 @@ class Database:
                 payload['source_node_id'] = source_node_id
             created_ids.append(self.add_character_history(payload))
         return created_ids
+
+    # ============== 时间线与事件账本 ==============
+
+    def get_timeline_events(self, book_id, entity_name=None, event_type=None, node_id=None):
+        conn = self._conn()
+        query = 'SELECT * FROM timeline_events WHERE book_id=?'
+        vals = [book_id]
+        if entity_name:
+            query += ' AND entity_name=?'
+            vals.append(entity_name)
+        if event_type:
+            query += ' AND event_type=?'
+            vals.append(event_type)
+        if node_id:
+            query += ' AND node_id=?'
+            vals.append(node_id)
+        query += ' ORDER BY chapter_number ASC, created_at ASC'
+        rows = conn.execute(query, tuple(vals)).fetchall()
+        conn.close()
+        events = []
+        for r in rows:
+            d = dict(r)
+            self._decrypt_fields(d, ['description', 'state_before', 'state_after', 'chapter_title', 'tags'])
+            events.append(d)
+        return events
+
+    def add_timeline_event(self, data):
+        eid = str(uuid.uuid4())[:8]
+        now = datetime.now().isoformat()
+        conn = self._conn()
+        conn.execute('''INSERT INTO timeline_events
+            (id, book_id, node_id, chapter_title, chapter_number, event_type, entity_name,
+             description, state_before, state_after, effective_from, effective_to, tags, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (eid, data['book_id'], data.get('node_id', ''),
+             encrypt(data.get('chapter_title', '')),
+             data.get('chapter_number', 0),
+             data.get('event_type', 'event'),
+             data.get('entity_name', ''),
+             encrypt(data.get('description', '')),
+             encrypt(data.get('state_before', '')),
+             encrypt(data.get('state_after', '')),
+             data.get('effective_from', ''),
+             data.get('effective_to', ''),
+             encrypt(data.get('tags', '')),
+             now))
+        conn.commit()
+        conn.close()
+        return eid
+
+    def update_timeline_event(self, event_id, data):
+        conn = self._conn()
+        fields = []
+        vals = []
+        encrypted_fields = {'description', 'state_before', 'state_after', 'chapter_title', 'tags'}
+        for k in ['chapter_title', 'chapter_number', 'event_type', 'entity_name', 'description',
+                  'state_before', 'state_after', 'effective_from', 'effective_to', 'tags', 'node_id']:
+            if k in data:
+                fields.append(f'{k}=?')
+                vals.append(encrypt(data[k]) if k in encrypted_fields else data[k])
+        if not fields:
+            conn.close()
+            return
+        vals.append(event_id)
+        conn.execute(f'UPDATE timeline_events SET {",".join(fields)} WHERE id=?', vals)
+        conn.commit()
+        conn.close()
+
+    def delete_timeline_event(self, event_id):
+        conn = self._conn()
+        conn.execute('DELETE FROM timeline_events WHERE id=?', (event_id,))
+        conn.commit()
+        conn.close()
+
+    # ============== 内容快照 ==============
+
+    def get_snapshots(self, node_id, limit=20):
+        conn = self._conn()
+        rows = conn.execute(
+            'SELECT id, node_id, book_id, word_count, label, trigger_type, created_at '
+            'FROM content_snapshots WHERE node_id=? ORDER BY created_at DESC LIMIT ?',
+            (node_id, limit)).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def create_snapshot(self, node_id, book_id, content, label='', trigger_type='auto'):
+        sid = str(uuid.uuid4())[:8]
+        now = datetime.now().isoformat()
+        conn = self._conn()
+        conn.execute('''INSERT INTO content_snapshots
+            (id, node_id, book_id, content, word_count, label, trigger_type, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+            (sid, node_id, book_id, encrypt(content), len(content), label, trigger_type, now))
+        # Keep only the last 30 snapshots per node
+        conn.execute('''DELETE FROM content_snapshots WHERE node_id=? AND id NOT IN
+            (SELECT id FROM content_snapshots WHERE node_id=? ORDER BY created_at DESC LIMIT 30)''',
+            (node_id, node_id))
+        conn.commit()
+        conn.close()
+        return sid
+
+    def get_snapshot_content(self, snapshot_id):
+        conn = self._conn()
+        row = conn.execute('SELECT * FROM content_snapshots WHERE id=?', (snapshot_id,)).fetchone()
+        conn.close()
+        if not row:
+            return None
+        d = dict(row)
+        d['content'] = decrypt(d.get('content', ''))
+        return d
+
+    # ============== 回收站 ==============
+
+    def soft_delete_node(self, node_id):
+        """将节点及其所有子节点移入回收站，返回被删除的节点ID列表"""
+        conn = self._conn()
+        # Collect all descendant nodes
+        all_ids = []
+        queue = [node_id]
+        while queue:
+            current = queue.pop()
+            row = conn.execute('SELECT * FROM nodes WHERE id=?', (current,)).fetchone()
+            if not row:
+                continue
+            node = dict(row)
+            content_row = conn.execute('SELECT content, word_count FROM node_contents WHERE node_id=?', (current,)).fetchone()
+            content = ''
+            word_count = 0
+            if content_row:
+                content = decrypt(content_row['content'] or '')
+                word_count = content_row['word_count'] or 0
+            did = str(uuid.uuid4())[:8]
+            restore_data = json.dumps({
+                'original_node_id': current,
+                'parent_id': node.get('parent_id', ''),
+                'book_id': node['book_id'],
+                'sort_order': node['sort_order'],
+                'status': node.get('status', 'draft'),
+                'type': node.get('type', 'chapter'),
+            })
+            conn.execute('''INSERT INTO deleted_nodes
+                (id, original_node_id, book_id, parent_id, node_type, title, content, word_count, sort_order, deleted_at, restore_data)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                (did, current, node['book_id'], node.get('parent_id', '') or '',
+                 node.get('type', 'chapter'), node.get('title', ''),
+                 encrypt(content), word_count, node.get('sort_order', 0),
+                 datetime.now().isoformat(), restore_data))
+            all_ids.append(current)
+            # Queue children
+            children = conn.execute('SELECT id FROM nodes WHERE parent_id=?', (current,)).fetchall()
+            for child in children:
+                queue.append(child['id'])
+        # Now delete from main tables
+        for nid in all_ids:
+            conn.execute('DELETE FROM nodes WHERE id=?', (nid,))
+        conn.commit()
+        conn.close()
+        return all_ids
+
+    def get_deleted_nodes(self, book_id):
+        conn = self._conn()
+        rows = conn.execute(
+            'SELECT * FROM deleted_nodes WHERE book_id=? ORDER BY deleted_at DESC',
+            (book_id,)).fetchall()
+        conn.close()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d['content'] = decrypt(d.get('content', ''))
+            result.append(d)
+        return result
+
+    def restore_deleted_node(self, deleted_id):
+        conn = self._conn()
+        row = conn.execute('SELECT * FROM deleted_nodes WHERE id=?', (deleted_id,)).fetchone()
+        if not row:
+            conn.close()
+            return False
+        d = dict(row)
+        restore_data = json.loads(d.get('restore_data', '{}'))
+        now = datetime.now().isoformat()
+        nid = d['original_node_id']
+        # Check if node_id still exists (conflict)
+        existing = conn.execute('SELECT id FROM nodes WHERE id=?', (nid,)).fetchone()
+        if existing:
+            nid = str(uuid.uuid4())[:8]
+        conn.execute('''INSERT INTO nodes (id, book_id, parent_id, type, title, sort_order, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (nid, d['book_id'], restore_data.get('parent_id') or None,
+             d.get('node_type', 'chapter'), d['title'],
+             d.get('sort_order', 0), restore_data.get('status', 'draft'), now, now))
+        content = d.get('content', '')
+        conn.execute('''INSERT OR REPLACE INTO node_contents (node_id, content, word_count, updated_at)
+            VALUES (?, ?, ?, ?)''', (nid, encrypt(content), len(content), now))
+        conn.execute('DELETE FROM deleted_nodes WHERE id=?', (deleted_id,))
+        conn.commit()
+        conn.close()
+        return nid
+
+    def purge_deleted_node(self, deleted_id):
+        conn = self._conn()
+        conn.execute('DELETE FROM deleted_nodes WHERE id=?', (deleted_id,))
+        conn.commit()
+        conn.close()
+
+    # ============== 创作规则中心 ==============
+
+    def get_writing_rules(self, book_id, rule_type=None):
+        conn = self._conn()
+        if rule_type:
+            rows = conn.execute(
+                'SELECT * FROM writing_rules WHERE book_id=? AND rule_type=? ORDER BY sort_order, created_at',
+                (book_id, rule_type)).fetchall()
+        else:
+            rows = conn.execute(
+                'SELECT * FROM writing_rules WHERE book_id=? ORDER BY sort_order, rule_type, created_at',
+                (book_id,)).fetchall()
+        conn.close()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d['content'] = decrypt(d.get('content', ''))
+            d['title'] = decrypt(d.get('title', ''))
+            result.append(d)
+        return result
+
+    def add_writing_rule(self, data):
+        rid = str(uuid.uuid4())[:8]
+        now = datetime.now().isoformat()
+        conn = self._conn()
+        conn.execute('''INSERT INTO writing_rules
+            (id, book_id, rule_type, title, content, is_active, sort_order, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (rid, data['book_id'], data.get('rule_type', 'style'),
+             encrypt(data.get('title', '')), encrypt(data.get('content', '')),
+             1 if data.get('is_active', True) else 0,
+             data.get('sort_order', 0), now, now))
+        conn.commit()
+        conn.close()
+        return rid
+
+    def update_writing_rule(self, rule_id, data):
+        conn = self._conn()
+        fields = []
+        vals = []
+        for k in ['rule_type', 'is_active', 'sort_order']:
+            if k in data:
+                fields.append(f'{k}=?')
+                vals.append(1 if (k == 'is_active' and data[k]) else (0 if k == 'is_active' else data[k]))
+        for k in ['title', 'content']:
+            if k in data:
+                fields.append(f'{k}=?')
+                vals.append(encrypt(data[k]))
+        fields.append('updated_at=?')
+        vals.append(datetime.now().isoformat())
+        vals.append(rule_id)
+        conn.execute(f'UPDATE writing_rules SET {",".join(fields)} WHERE id=?', vals)
+        conn.commit()
+        conn.close()
+
+    def delete_writing_rule(self, rule_id):
+        conn = self._conn()
+        conn.execute('DELETE FROM writing_rules WHERE id=?', (rule_id,))
+        conn.commit()
+        conn.close()
+
+    def get_active_writing_rules_text(self, book_id):
+        """返回所有激活规则的文本，供注入 prompt 使用"""
+        rules = self.get_writing_rules(book_id)
+        active = [r for r in rules if r.get('is_active')]
+        if not active:
+            return ''
+        lines = ['=== 创作规则 ===']
+        type_labels = {
+            'style': '文风', 'pov': '视角', 'forbidden': '禁用词',
+            'character_voice': '角色语气', 'format': '格式规范', 'other': '其他规则'
+        }
+        by_type = {}
+        for r in active:
+            t = r.get('rule_type', 'other')
+            by_type.setdefault(t, []).append(r)
+        for rtype, items in by_type.items():
+            label = type_labels.get(rtype, rtype)
+            lines.append(f'[{label}]')
+            for item in items:
+                lines.append(f'- {item["title"]}: {item["content"][:200]}')
+        return '\n'.join(lines)
+
+    # ============== 异步任务中心 ==============
+
+    def create_async_task(self, user_id, task_type, book_id=''):
+        tid = str(uuid.uuid4())[:12]
+        now = datetime.now().isoformat()
+        conn = self._conn()
+        conn.execute('''INSERT INTO async_tasks
+            (id, book_id, user_id, task_type, status, progress, total, result, error, created_at, updated_at)
+            VALUES (?, ?, ?, ?, 'pending', 0, 0, '', '', ?, ?)''',
+            (tid, book_id, user_id, task_type, now, now))
+        conn.commit()
+        conn.close()
+        return tid
+
+    def update_async_task(self, task_id, status=None, progress=None, total=None, result=None, error=None):
+        conn = self._conn()
+        fields = ['updated_at=?']
+        vals = [datetime.now().isoformat()]
+        if status is not None:
+            fields.append('status=?')
+            vals.append(status)
+        if progress is not None:
+            fields.append('progress=?')
+            vals.append(progress)
+        if total is not None:
+            fields.append('total=?')
+            vals.append(total)
+        if result is not None:
+            fields.append('result=?')
+            vals.append(result[:4000] if isinstance(result, str) else str(result))
+        if error is not None:
+            fields.append('error=?')
+            vals.append(str(error)[:1000])
+        vals.append(task_id)
+        conn.execute(f'UPDATE async_tasks SET {",".join(fields)} WHERE id=?', vals)
+        conn.commit()
+        conn.close()
+
+    def get_async_task(self, task_id):
+        conn = self._conn()
+        row = conn.execute('SELECT * FROM async_tasks WHERE id=?', (task_id,)).fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def get_async_tasks(self, user_id, book_id=None, status=None, limit=50):
+        conn = self._conn()
+        query = 'SELECT * FROM async_tasks WHERE user_id=?'
+        vals = [user_id]
+        if book_id:
+            query += ' AND book_id=?'
+            vals.append(book_id)
+        if status:
+            query += ' AND status=?'
+            vals.append(status)
+        query += ' ORDER BY created_at DESC LIMIT ?'
+        vals.append(limit)
+        rows = conn.execute(query, tuple(vals)).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def cancel_async_task(self, task_id, user_id):
+        conn = self._conn()
+        conn.execute(
+            "UPDATE async_tasks SET status='cancelled', updated_at=? WHERE id=? AND user_id=? AND status IN ('pending','running')",
+            (datetime.now().isoformat(), task_id, user_id))
+        conn.commit()
+        conn.close()
 
     # ============== 全量数据导出 ==============
 

@@ -20,7 +20,7 @@
                 <select id="currentBook" onchange="App.switchBook(this.value)">
                     <option value="">— 选择书籍 —</option>
                 </select>
-                <button class="btn btn-sm btn-ghost" onclick="App.showNewBookDialog()" title="新建书籍">
+                <button class="btn btn-sm btn-ghost" onclick="App.showNewBookDialog()" title="新建书籍（含模板）">
                     <i class="fas fa-plus"></i>
                 </button>
             </div>
@@ -34,6 +34,15 @@
         </div>
         <div class="top-bar-right">
             <span class="user-pill" id="userPill" title="当前账号">未登录</span>
+            <button class="btn btn-sm btn-ghost" onclick="App.showGlobalSearch()" title="全局搜索">
+                <i class="fas fa-search"></i>
+            </button>
+            <button class="btn btn-sm btn-ghost" onclick="App.showRecycleBin()" title="回收站">
+                <i class="fas fa-trash-restore"></i>
+            </button>
+            <button class="btn btn-sm btn-ghost" onclick="App.showTaskCenter()" title="任务中心" id="taskCenterBtn">
+                <i class="fas fa-tasks"></i>
+            </button>
             <button class="btn btn-sm btn-ghost" onclick="App.showExportMenu()" title="导出">
                 <i class="fas fa-file-export"></i>
             </button>
@@ -247,6 +256,15 @@
                 </button>
                 <button class="panel-tab" data-tab="memory" onclick="App.switchRightTab('memory')">
                     <i class="fas fa-database"></i> 记忆
+                </button>
+                <button class="panel-tab" data-tab="timeline" onclick="App.switchRightTab('timeline')">
+                    <i class="fas fa-timeline"></i> 时间线
+                </button>
+                <button class="panel-tab" data-tab="rules" onclick="App.switchRightTab('rules')">
+                    <i class="fas fa-scroll"></i> 规则
+                </button>
+                <button class="panel-tab" data-tab="snapshots" onclick="App.switchRightTab('snapshots')">
+                    <i class="fas fa-camera-retro"></i> 快照
                 </button>
             </div>
 
@@ -769,6 +787,76 @@
                     <div id="entityResults" class="entity-results"></div>
                 </div>
             </div>
+
+            <!-- 时间线面板 -->
+            <div class="panel-content tab-content" id="tabTimeline">
+                <div class="memory-section">
+                    <h4><i class="fas fa-timeline"></i> 时间线与事件账本</h4>
+                    <div class="panel-toolbar">
+                        <button class="btn btn-xs btn-primary" onclick="App.addTimelineEvent()">
+                            <i class="fas fa-plus"></i> 添加事件
+                        </button>
+                        <button class="btn btn-xs btn-ghost" onclick="App.extractTimelineFromChapter()">
+                            <i class="fas fa-wand-magic-sparkles"></i> 自动提取
+                        </button>
+                        <select class="filter-select" id="timelineFilter" onchange="App.loadTimeline()">
+                            <option value="">全部类型</option>
+                            <option value="injury">受伤/死亡</option>
+                            <option value="recovery">恢复</option>
+                            <option value="location">位置变化</option>
+                            <option value="relationship">关系变化</option>
+                            <option value="item">物品得失</option>
+                            <option value="revelation">真相揭露</option>
+                            <option value="other">其他</option>
+                        </select>
+                    </div>
+                    <div class="timeline-entity-filter">
+                        <input type="text" id="timelineEntityFilter" placeholder="按角色筛选..."
+                               onkeydown="if(event.key==='Enter') App.loadTimeline()">
+                    </div>
+                    <div class="timeline-list" id="timelineList">
+                        <p class="agent-hint"><i class="fas fa-info-circle"></i> 追踪角色状态变化和关键事件的时间线</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 创作规则面板 -->
+            <div class="panel-content tab-content" id="tabRules">
+                <div class="memory-section">
+                    <h4><i class="fas fa-scroll"></i> 创作规则中心 / 风格圣经</h4>
+                    <div class="panel-toolbar">
+                        <button class="btn btn-xs btn-primary" onclick="App.addWritingRule()">
+                            <i class="fas fa-plus"></i> 添加规则
+                        </button>
+                        <select class="filter-select" id="rulesTypeFilter" onchange="App.loadWritingRules()">
+                            <option value="">全部类型</option>
+                            <option value="style">文风</option>
+                            <option value="pov">视角规则</option>
+                            <option value="forbidden">禁用词/规避</option>
+                            <option value="character_voice">角色语气</option>
+                            <option value="format">格式规范</option>
+                            <option value="other">其他规则</option>
+                        </select>
+                    </div>
+                    <div class="rules-list" id="writingRulesList">
+                        <p class="agent-hint"><i class="fas fa-info-circle"></i> 定义你的文风约束、叙事规则和格式要求，AI写作时会自动遵守</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 快照面板 -->
+            <div class="panel-content tab-content" id="tabSnapshots">
+                <div class="memory-section">
+                    <h4><i class="fas fa-camera-retro"></i> 内容快照</h4>
+                    <div class="panel-toolbar">
+                        <button class="btn btn-xs btn-primary" onclick="App.createManualSnapshot()">
+                            <i class="fas fa-camera"></i> 手动快照
+                        </button>
+                    </div>
+                    <p class="agent-hint">AI改写前会自动创建快照，可随时恢复</p>
+                    <div class="snapshots-list" id="snapshotsList"></div>
+                </div>
+            </div>
         </aside>
     </main>
 
@@ -1094,6 +1182,225 @@
 
     <!-- Toast 通知 -->
     <div class="toast-container" id="toastContainer"></div>
+
+    <!-- ========== 模态框：新建书籍（带模板） ========== -->
+    <div class="modal-overlay" id="newBookWithTemplateModal" style="display:none;">
+        <div class="modal modal-lg">
+            <div class="modal-header">
+                <h3><i class="fas fa-wand-magic-sparkles"></i> 新建书籍</h3>
+                <button class="btn btn-ghost modal-close" onclick="App.closeNewBookWithTemplateDialog()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="settings-hint">选择一个模板快速开始，也可以从空白项目开始</p>
+                <div class="template-grid" id="templateGrid">
+                    <!-- 模板卡片由JS渲染 -->
+                </div>
+                <div class="template-selected-form" id="templateSelectedForm" style="display:none;">
+                    <h4 id="templateSelectedName"></h4>
+                    <div class="form-group">
+                        <label>书名</label>
+                        <input type="text" id="templateBookTitle" placeholder="我的小说">
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>作者</label>
+                            <input type="text" id="templateBookAuthor" placeholder="笔名">
+                        </div>
+                        <div class="form-group">
+                            <label>类型</label>
+                            <input type="text" id="templateBookGenre" placeholder="玄幻/都市/科幻...">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>简介（可选）</label>
+                        <textarea id="templateBookDesc" rows="2" placeholder="简要描述你的故事..."></textarea>
+                    </div>
+                    <div class="form-actions">
+                        <button class="btn btn-primary" onclick="App.createBookFromTemplate()">
+                            <i class="fas fa-rocket"></i> 开始创作
+                        </button>
+                        <button class="btn btn-ghost" onclick="App.resetTemplateSelection()">返回选择</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== 模态框：全局搜索与替换 ========== -->
+    <div class="modal-overlay" id="globalSearchModal" style="display:none;">
+        <div class="modal modal-lg">
+            <div class="modal-header">
+                <h3><i class="fas fa-search"></i> 全局搜索与替换</h3>
+                <button class="btn btn-ghost modal-close" onclick="App.closeGlobalSearch()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-row" style="gap:8px;align-items:flex-end;">
+                    <div class="form-group" style="flex:1;">
+                        <label>搜索</label>
+                        <input type="text" id="globalSearchQuery" placeholder="搜索文本..."
+                               onkeydown="if(event.key==='Enter') App.doGlobalSearch()">
+                    </div>
+                    <div class="form-group" style="flex:1;">
+                        <label>替换为</label>
+                        <input type="text" id="globalReplaceText" placeholder="替换内容（留空则只搜索）">
+                    </div>
+                    <div>
+                        <label class="toggle-label" title="区分大小写">
+                            <input type="checkbox" id="searchCaseSensitive">
+                            <span class="toggle-switch"></span>
+                            <span>区分大小写</span>
+                        </label>
+                    </div>
+                </div>
+                <div class="form-actions" style="margin-bottom:12px;">
+                    <button class="btn btn-primary" onclick="App.doGlobalSearch()">
+                        <i class="fas fa-search"></i> 搜索
+                    </button>
+                    <button class="btn btn-warning" onclick="App.doGlobalReplace()" id="globalReplaceBtn" disabled>
+                        <i class="fas fa-exchange-alt"></i> 全部替换
+                    </button>
+                </div>
+                <div id="globalSearchResults" class="search-results-list"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== 模态框：回收站 ========== -->
+    <div class="modal-overlay" id="recycleBinModal" style="display:none;">
+        <div class="modal modal-lg">
+            <div class="modal-header">
+                <h3><i class="fas fa-trash-restore"></i> 回收站</h3>
+                <button class="btn btn-ghost modal-close" onclick="App.closeRecycleBin()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="settings-hint">删除的章节会暂存在回收站，可恢复或永久删除</p>
+                <div id="recycleBinList" class="recycle-bin-list"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== 模态框：异步任务中心 ========== -->
+    <div class="modal-overlay" id="taskCenterModal" style="display:none;">
+        <div class="modal modal-lg">
+            <div class="modal-header">
+                <h3><i class="fas fa-tasks"></i> 后台任务中心</h3>
+                <button class="btn btn-ghost modal-close" onclick="App.closeTaskCenter()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-actions" style="margin-bottom:12px;">
+                    <button class="btn btn-sm btn-ghost" onclick="App.loadTasks()">
+                        <i class="fas fa-rotate"></i> 刷新
+                    </button>
+                    <button class="btn btn-sm btn-primary" onclick="App.buildVectorIndexAsync()">
+                        <i class="fas fa-database"></i> 异步构建向量索引
+                    </button>
+                    <button class="btn btn-sm btn-ghost" onclick="App.refreshCharacterHistoryAsync()">
+                        <i class="fas fa-user-clock"></i> 异步回填人物历史
+                    </button>
+                </div>
+                <div id="taskList" class="task-list"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== 模态框：添加时间线事件 ========== -->
+    <div class="modal-overlay" id="timelineEventModal" style="display:none;">
+        <div class="modal">
+            <div class="modal-header">
+                <h3 id="timelineEventModalTitle"><i class="fas fa-timeline"></i> 添加时间线事件</h3>
+                <button class="btn btn-ghost modal-close" onclick="App.closeTimelineEventModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="timelineEventId">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>涉及角色/实体</label>
+                        <input type="text" id="timelineEntityName" placeholder="角色或地点名称">
+                    </div>
+                    <div class="form-group">
+                        <label>事件类型</label>
+                        <select id="timelineEventType">
+                            <option value="event">普通事件</option>
+                            <option value="injury">受伤</option>
+                            <option value="recovery">恢复</option>
+                            <option value="location">位置变化</option>
+                            <option value="relationship">关系变化</option>
+                            <option value="item">物品得失</option>
+                            <option value="death">死亡/消失</option>
+                            <option value="revelation">真相揭露</option>
+                            <option value="other">其他</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>章节名称</label>
+                        <input type="text" id="timelineChapterTitle" placeholder="第X章">
+                    </div>
+                    <div class="form-group">
+                        <label>章节序号</label>
+                        <input type="number" id="timelineChapterNumber" value="0" min="0">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>事件描述</label>
+                    <textarea id="timelineDescription" rows="2" placeholder="描述发生了什么..."></textarea>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>变化前状态</label>
+                        <input type="text" id="timelineStateBefore" placeholder="如：手臂完好">
+                    </div>
+                    <div class="form-group">
+                        <label>变化后状态</label>
+                        <input type="text" id="timelineStateAfter" placeholder="如：手臂受伤">
+                    </div>
+                </div>
+                <div class="form-actions">
+                    <button class="btn btn-primary" onclick="App.saveTimelineEvent()">保存</button>
+                    <button class="btn btn-ghost" onclick="App.closeTimelineEventModal()">取消</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== 模态框：添加创作规则 ========== -->
+    <div class="modal-overlay" id="writingRuleModal" style="display:none;">
+        <div class="modal">
+            <div class="modal-header">
+                <h3 id="writingRuleModalTitle"><i class="fas fa-scroll"></i> 添加创作规则</h3>
+                <button class="btn btn-ghost modal-close" onclick="App.closeWritingRuleModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="writingRuleId">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>规则标题</label>
+                        <input type="text" id="writingRuleTitle" placeholder="如：主角视角规则">
+                    </div>
+                    <div class="form-group">
+                        <label>规则类型</label>
+                        <select id="writingRuleType">
+                            <option value="style">文风</option>
+                            <option value="pov">叙事视角</option>
+                            <option value="forbidden">禁用词/规避</option>
+                            <option value="character_voice">角色语气</option>
+                            <option value="format">格式规范</option>
+                            <option value="other">其他规则</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>规则内容</label>
+                    <textarea id="writingRuleContent" rows="4" placeholder="详细描述这条规则..."></textarea>
+                </div>
+                <div class="form-actions">
+                    <button class="btn btn-primary" onclick="App.saveWritingRule()">保存</button>
+                    <button class="btn btn-ghost" onclick="App.closeWritingRuleModal()">取消</button>
+                </div>
+            </div>
+        </div>
+    </div>
 
     <script src="/static/js/app.js"></script>
 </body>

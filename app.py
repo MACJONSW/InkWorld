@@ -289,7 +289,20 @@ def inject_context():
     if book_id:
         _require_book_access(book_id)
     injected = memory_engine.dynamic_inject(book_id, text)
-    return jsonify({'injected_entries': injected})
+    # Enrich with source chapter info for explainability
+    enriched = []
+    for entry in injected:
+        item = {
+            'id': entry.get('id', ''),
+            'name': entry.get('name', ''),
+            'category': entry.get('category', ''),
+            'content': entry.get('content', '')[:300],
+            'match_type': entry.get('match_type', 'keyword'),
+            'similarity': entry.get('similarity'),
+            'source': 'lorebook',
+        }
+        enriched.append(item)
+    return jsonify({'injected_entries': enriched})
 
 # ===================== 模块三：多智能体 API =====================
 
@@ -546,8 +559,8 @@ def update_node(node_id):
 @app.route('/api/nodes/<node_id>', methods=['DELETE'])
 def delete_node(node_id):
     _require_node_access(node_id)
-    db.delete_node(node_id)
-    return jsonify({'status': 'ok'})
+    deleted_ids = db.soft_delete_node(node_id)
+    return jsonify({'status': 'ok', 'deleted_count': len(deleted_ids)})
 
 @app.route('/api/nodes/reorder', methods=['POST'])
 def reorder_nodes():
@@ -569,6 +582,14 @@ def get_node_content(node_id):
 def save_node_content(node_id):
     _require_node_access(node_id)
     data = _json_body()
+    # If the request indicates AI-generated content, auto-snapshot the previous content
+    if data.get('auto_snapshot'):
+        book_id = db.get_node_book_id(node_id)
+        current = db.get_node_content(node_id).get('content', '')
+        if current and len(current) > 50:
+            db.create_snapshot(node_id, book_id or '', current,
+                              label=data.get('snapshot_label', 'AI改写前自动备份'),
+                              trigger_type='auto')
     db.save_node_content(node_id, data)
     return jsonify({'status': 'ok'})
 
@@ -971,6 +992,418 @@ def agent_draft_guarded():
 def diagnostics_tension(book_id):
     _require_book_access(book_id)
     return jsonify(_build_tension_diagnostics(book_id))
+
+# ===================== 时间线与事件账本 =====================
+
+@app.route('/api/timeline/<book_id>', methods=['GET'])
+def get_timeline(book_id):
+    _require_book_access(book_id)
+    entity = request.args.get('entity')
+    event_type = request.args.get('event_type')
+    node_id = request.args.get('node_id')
+    events = db.get_timeline_events(book_id, entity_name=entity, event_type=event_type, node_id=node_id)
+    return jsonify(events)
+
+@app.route('/api/timeline/<book_id>', methods=['POST'])
+def add_timeline_event(book_id):
+    _require_book_access(book_id)
+    data = _json_body()
+    data['book_id'] = book_id
+    event_id = db.add_timeline_event(data)
+    return jsonify({'id': event_id, 'status': 'ok'})
+
+@app.route('/api/timeline/<book_id>/<event_id>', methods=['PUT'])
+def update_timeline_event(book_id, event_id):
+    _require_book_access(book_id)
+    data = _json_body()
+    db.update_timeline_event(event_id, data)
+    return jsonify({'status': 'ok'})
+
+@app.route('/api/timeline/<book_id>/<event_id>', methods=['DELETE'])
+def delete_timeline_event(book_id, event_id):
+    _require_book_access(book_id)
+    db.delete_timeline_event(event_id)
+    return jsonify({'status': 'ok'})
+
+@app.route('/api/agent/timeline-extract', methods=['POST'])
+def agent_timeline_extract():
+    """从章节内容自动提取时间线事件"""
+    data = _prepare_agent_data()
+    result = agent_orchestrator.run_timeline_extract(data)
+    if result.get('events') and data.get('book_id'):
+        for ev in result['events']:
+            ev['book_id'] = data['book_id']
+            ev['node_id'] = data.get('node_id', '')
+            db.add_timeline_event(ev)
+    return jsonify(result)
+
+# ===================== 内容快照与回滚 =====================
+
+@app.route('/api/snapshots/<node_id>', methods=['GET'])
+def get_snapshots(node_id):
+    _require_node_access(node_id)
+    snapshots = db.get_snapshots(node_id)
+    return jsonify(snapshots)
+
+@app.route('/api/snapshots/<node_id>', methods=['POST'])
+def create_snapshot(node_id):
+    _require_node_access(node_id)
+    data = _json_body()
+    book_id = db.get_node_book_id(node_id)
+    if book_id:
+        _require_book_access(book_id)
+    content = data.get('content') or db.get_node_content(node_id).get('content', '')
+    snap_id = db.create_snapshot(
+        node_id, book_id or '', content,
+        label=data.get('label', '手动快照'),
+        trigger_type=data.get('trigger_type', 'manual')
+    )
+    return jsonify({'id': snap_id, 'status': 'ok'})
+
+@app.route('/api/snapshots/<node_id>/<snap_id>/restore', methods=['POST'])
+def restore_snapshot(node_id, snap_id):
+    _require_node_access(node_id)
+    snap = db.get_snapshot_content(snap_id)
+    if not snap or snap['node_id'] != node_id:
+        return jsonify({'error': 'not_found'}), 404
+    # Create a snapshot of the current content before restoring
+    book_id = db.get_node_book_id(node_id)
+    current = db.get_node_content(node_id).get('content', '')
+    db.create_snapshot(node_id, book_id or '', current, label='恢复前自动备份', trigger_type='auto')
+    db.save_node_content(node_id, {'content': snap['content']})
+    return jsonify({'status': 'ok'})
+
+# ===================== 回收站 =====================
+
+@app.route('/api/recycle-bin/<book_id>', methods=['GET'])
+def get_recycle_bin(book_id):
+    _require_book_access(book_id)
+    items = db.get_deleted_nodes(book_id)
+    # Don't expose full content in list view
+    for item in items:
+        item.pop('content', None)
+    return jsonify(items)
+
+@app.route('/api/recycle-bin/<book_id>/<item_id>/restore', methods=['POST'])
+def restore_deleted_node(book_id, item_id):
+    _require_book_access(book_id)
+    new_id = db.restore_deleted_node(item_id)
+    if not new_id:
+        return jsonify({'error': 'not_found'}), 404
+    return jsonify({'status': 'ok', 'node_id': new_id})
+
+@app.route('/api/recycle-bin/<book_id>/<item_id>', methods=['DELETE'])
+def purge_deleted_node(book_id, item_id):
+    _require_book_access(book_id)
+    db.purge_deleted_node(item_id)
+    return jsonify({'status': 'ok'})
+
+# ===================== 全局搜索与替换 =====================
+
+@app.route('/api/search/<book_id>', methods=['POST'])
+def global_search(book_id):
+    _require_book_access(book_id)
+    data = _json_body()
+    query = data.get('query', '').strip()
+    if not query:
+        return jsonify({'results': []})
+    case_sensitive = data.get('case_sensitive', False)
+    node_types = data.get('node_types', ['chapter', 'scene'])
+
+    tree = db.get_document_tree(book_id)
+    results = []
+    for node in _walk_tree_nodes(tree):
+        if node_types and node.get('type') not in node_types:
+            continue
+        content = db.get_node_content(node['id']).get('content', '')
+        if not content:
+            continue
+        search_content = content if case_sensitive else content.lower()
+        search_query = query if case_sensitive else query.lower()
+        if search_query not in search_content:
+            continue
+        # Find all match positions and build snippets
+        matches = []
+        start = 0
+        while True:
+            idx = search_content.find(search_query, start)
+            if idx == -1:
+                break
+            snippet_start = max(0, idx - 60)
+            snippet_end = min(len(content), idx + len(query) + 60)
+            matches.append({
+                'position': idx,
+                'snippet': content[snippet_start:snippet_end],
+                'match_start': idx - snippet_start,
+                'match_length': len(query),
+            })
+            start = idx + len(query)
+            if len(matches) >= 10:
+                break
+        if matches:
+            results.append({
+                'node_id': node['id'],
+                'title': node.get('title', ''),
+                'type': node.get('type', ''),
+                'match_count': len(matches),
+                'matches': matches,
+            })
+    return jsonify({'results': results, 'total': sum(r['match_count'] for r in results)})
+
+@app.route('/api/search/<book_id>/replace', methods=['POST'])
+def global_replace(book_id):
+    _require_book_access(book_id)
+    data = _json_body()
+    query = data.get('query', '').strip()
+    replacement = data.get('replacement', '')
+    node_ids = data.get('node_ids')  # Optional: limit to specific nodes
+    case_sensitive = data.get('case_sensitive', False)
+    if not query:
+        return jsonify({'error': 'empty_query'}), 400
+
+    tree = db.get_document_tree(book_id)
+    replaced_count = 0
+    affected_nodes = []
+    for node in _walk_tree_nodes(tree):
+        if node_ids and node['id'] not in node_ids:
+            continue
+        content_obj = db.get_node_content(node['id'])
+        content = content_obj.get('content', '')
+        if not content:
+            continue
+        if case_sensitive:
+            if query not in content:
+                continue
+            new_content = content.replace(query, replacement)
+        else:
+            import re as _re
+            pattern = _re.compile(_re.escape(query), _re.IGNORECASE)
+            if not pattern.search(content):
+                continue
+            new_content = pattern.sub(replacement, content)
+        if new_content != content:
+            # Auto-snapshot before replace
+            node_book_id = db.get_node_book_id(node['id'])
+            db.create_snapshot(node['id'], node_book_id or book_id, content,
+                              label=f'替换"{query}"前自动备份', trigger_type='auto')
+            db.save_node_content(node['id'], {'content': new_content})
+            replaced_count += new_content.lower().count(replacement.lower()) if replacement else 0
+            affected_nodes.append(node['id'])
+    return jsonify({'status': 'ok', 'affected_nodes': len(affected_nodes), 'replaced_count': replaced_count})
+
+# ===================== 创作规则中心 =====================
+
+@app.route('/api/writing-rules/<book_id>', methods=['GET'])
+def get_writing_rules(book_id):
+    _require_book_access(book_id)
+    rule_type = request.args.get('type')
+    rules = db.get_writing_rules(book_id, rule_type=rule_type)
+    return jsonify(rules)
+
+@app.route('/api/writing-rules/<book_id>', methods=['POST'])
+def add_writing_rule(book_id):
+    _require_book_access(book_id)
+    data = _json_body()
+    data['book_id'] = book_id
+    rule_id = db.add_writing_rule(data)
+    return jsonify({'id': rule_id, 'status': 'ok'})
+
+@app.route('/api/writing-rules/<book_id>/<rule_id>', methods=['PUT'])
+def update_writing_rule(book_id, rule_id):
+    _require_book_access(book_id)
+    data = _json_body()
+    db.update_writing_rule(rule_id, data)
+    return jsonify({'status': 'ok'})
+
+@app.route('/api/writing-rules/<book_id>/<rule_id>', methods=['DELETE'])
+def delete_writing_rule(book_id, rule_id):
+    _require_book_access(book_id)
+    db.delete_writing_rule(rule_id)
+    return jsonify({'status': 'ok'})
+
+# ===================== 异步任务中心 =====================
+
+@app.route('/api/tasks', methods=['GET'])
+def get_tasks():
+    book_id = request.args.get('book_id')
+    status = request.args.get('status')
+    if book_id:
+        _require_book_access(book_id)
+    tasks = db.get_async_tasks(g.user_id, book_id=book_id, status=status)
+    return jsonify(tasks)
+
+@app.route('/api/tasks/<task_id>', methods=['GET'])
+def get_task(task_id):
+    task = db.get_async_task(task_id)
+    if not task or task.get('user_id') != g.user_id:
+        return jsonify({'error': 'not_found'}), 404
+    return jsonify(task)
+
+@app.route('/api/tasks/<task_id>/cancel', methods=['POST'])
+def cancel_task(task_id):
+    task = db.get_async_task(task_id)
+    if not task or task.get('user_id') != g.user_id:
+        return jsonify({'error': 'not_found'}), 404
+    db.cancel_async_task(task_id, g.user_id)
+    return jsonify({'status': 'ok'})
+
+@app.route('/api/memory/vectorize-async/<book_id>', methods=['POST'])
+def vectorize_book_async(book_id):
+    """异步向量化整本书"""
+    _require_book_access(book_id)
+    task_id = db.create_async_task(g.user_id, 'vectorize', book_id=book_id)
+
+    def run_task():
+        try:
+            db.update_async_task(task_id, status='running', progress=0, total=1)
+            result = memory_engine.vectorize_book(book_id)
+            db.update_async_task(task_id, status='completed', progress=1, total=1,
+                                result=json.dumps(result))
+        except Exception as e:
+            db.update_async_task(task_id, status='failed', error=str(e))
+
+    t = threading.Thread(target=run_task, daemon=True)
+    t.start()
+    return jsonify({'task_id': task_id, 'status': 'pending'})
+
+@app.route('/api/character-history/<book_id>/refresh-async', methods=['POST'])
+def refresh_character_history_async(book_id):
+    """异步回填全书人物历史"""
+    _require_book_access(book_id)
+    task_id = db.create_async_task(g.user_id, 'refresh_character_history', book_id=book_id)
+
+    def run_task():
+        try:
+            db.update_async_task(task_id, status='running', progress=0)
+            result = memory_engine.refresh_character_history_for_book(book_id)
+            db.update_async_task(task_id, status='completed', progress=1, total=1,
+                                result=json.dumps({'updated': result.get('total_created', 0)}))
+        except Exception as e:
+            db.update_async_task(task_id, status='failed', error=str(e))
+
+    t = threading.Thread(target=run_task, daemon=True)
+    t.start()
+    return jsonify({'task_id': task_id, 'status': 'pending'})
+
+# ===================== 项目模板（新手引导）=====================
+
+_BOOK_TEMPLATES = {
+    'fantasy': {
+        'name': '玄幻/奇幻',
+        'description': '宏大世界观、功法体系、修炼升级',
+        'genre': '玄幻',
+        'default_rules': [
+            {'rule_type': 'style', 'title': '文风', 'content': '气势磅礴，描写宏大，战斗场面激烈'},
+            {'rule_type': 'pov', 'title': '视角规则', 'content': '以主角视角为主，第三人称限制视角'},
+            {'rule_type': 'format', 'title': '章节格式', 'content': '每章2000-4000字，结尾留钩子'},
+        ],
+        'lorebook_entries': [
+            {'category': 'rule', 'name': '修炼体系', 'content': '请在此填写修炼境界体系'},
+            {'category': 'location', 'name': '主要地点', 'content': '请在此填写主要世界地理'},
+        ],
+    },
+    'romance': {
+        'name': '言情/现代',
+        'description': '都市情感，人物关系细腻',
+        'genre': '言情',
+        'default_rules': [
+            {'rule_type': 'style', 'title': '文风', 'content': '细腻温柔，情感描写丰富，心理描写深入'},
+            {'rule_type': 'pov', 'title': '视角规则', 'content': '女主视角为主，第一或第三人称均可'},
+            {'rule_type': 'character_voice', 'title': '对话风格', 'content': '对话自然，符合当代都市语境'},
+        ],
+        'lorebook_entries': [
+            {'category': 'character', 'name': '男主角', 'content': '请填写男主角设定'},
+            {'category': 'character', 'name': '女主角', 'content': '请填写女主角设定'},
+        ],
+    },
+    'mystery': {
+        'name': '悬疑/推理',
+        'description': '谜题设计，节奏紧凑，伏笔密集',
+        'genre': '悬疑',
+        'default_rules': [
+            {'rule_type': 'style', 'title': '文风', 'content': '节奏紧凑，短句为主，制造紧张感'},
+            {'rule_type': 'pov', 'title': '视角规则', 'content': '严格限制视角，不得透露侦探未知信息'},
+            {'rule_type': 'forbidden', 'title': '禁止项', 'content': '禁止不合理的巧合解决问题；线索必须提前埋设'},
+        ],
+        'lorebook_entries': [
+            {'category': 'character', 'name': '侦探/主角', 'content': '请填写主角设定'},
+            {'category': 'rule', 'name': '谜题设定', 'content': '请填写核心谜题'},
+        ],
+    },
+    'scifi': {
+        'name': '科幻',
+        'description': '硬科幻或软科幻，未来世界设定',
+        'genre': '科幻',
+        'default_rules': [
+            {'rule_type': 'style', 'title': '文风', 'content': '理性严谨，科技感强，世界观构建细致'},
+            {'rule_type': 'pov', 'title': '视角规则', 'content': '第三人称全知或限制视角'},
+            {'rule_type': 'format', 'title': '科技设定规范', 'content': '科技设定需在Lorebook中记录，避免前后矛盾'},
+        ],
+        'lorebook_entries': [
+            {'category': 'rule', 'name': '科技体系', 'content': '请填写世界科技水平和设定'},
+            {'category': 'location', 'name': '世界观', 'content': '请填写世界背景设定'},
+        ],
+    },
+    'blank': {
+        'name': '空白项目',
+        'description': '从零开始，完全自定义',
+        'genre': '',
+        'default_rules': [],
+        'lorebook_entries': [],
+    },
+}
+
+@app.route('/api/templates', methods=['GET'])
+def get_templates():
+    result = []
+    for key, tmpl in _BOOK_TEMPLATES.items():
+        result.append({
+            'id': key,
+            'name': tmpl['name'],
+            'description': tmpl['description'],
+            'genre': tmpl['genre'],
+        })
+    return jsonify(result)
+
+@app.route('/api/books/from-template', methods=['POST'])
+def create_book_from_template():
+    data = _json_body()
+    template_id = data.get('template_id', 'blank')
+    tmpl = _BOOK_TEMPLATES.get(template_id, _BOOK_TEMPLATES['blank'])
+
+    book_data = {
+        'title': data.get('title', '未命名小说'),
+        'description': data.get('description', tmpl['description']),
+        'author': data.get('author', ''),
+        'genre': data.get('genre', tmpl['genre']),
+    }
+    book_id = db.create_book(book_data, g.user_id)
+
+    # Create default writing rules
+    for rule in tmpl.get('default_rules', []):
+        rule['book_id'] = book_id
+        db.add_writing_rule(rule)
+
+    # Create default lorebook entries
+    for entry in tmpl.get('lorebook_entries', []):
+        entry['book_id'] = book_id
+        db.add_lorebook_entry(entry)
+
+    # Create a default chapter structure
+    vol_id = db.create_node({
+        'book_id': book_id,
+        'type': 'volume',
+        'title': '第一卷',
+        'parent_id': None,
+    })
+    db.create_node({
+        'book_id': book_id,
+        'type': 'chapter',
+        'title': '第一章',
+        'parent_id': vol_id,
+    })
+
+    return jsonify({'id': book_id, 'status': 'ok', 'template': template_id})
 
 # ===================== 启动 =====================
 
