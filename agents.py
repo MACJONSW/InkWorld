@@ -16,6 +16,14 @@ class AgentOrchestrator:
         self._stop_flags = {}
         self._stop_lock = threading.Lock()
         self._request_ctx = threading.local()
+        self._rule_engine = None
+        self._stats_engine = None
+
+    def set_rule_engine(self, rule_engine):
+        self._rule_engine = rule_engine
+
+    def set_stats_engine(self, stats_engine):
+        self._stats_engine = stats_engine
 
     def set_request_user(self, user_id):
         self._request_ctx.user_id = user_id
@@ -48,8 +56,7 @@ class AgentOrchestrator:
             timeout=120.0,
             http_client=httpx.Client(
                 timeout=120.0,
-                follow_redirects=True,
-                verify=False
+                follow_redirects=True
             )
         )
         return client, model_config['model_id'], model_config
@@ -93,6 +100,8 @@ class AgentOrchestrator:
 
         params = self._get_params()
         user_id = self._current_user_id()
+        start_time = time.time()
+        first_token_time = None
 
         try:
             if stream:
@@ -113,16 +122,37 @@ class AgentOrchestrator:
                     if stop_event.is_set():
                         break
                     if chunk.choices and chunk.choices[0].delta.content:
+                        if first_token_time is None:
+                            first_token_time = time.time()
                         text = chunk.choices[0].delta.content
                         full_text += text
                         yield text
                 # Record tokens (estimate)
+                prompt_est = 0
+                comp_est = 0
                 try:
                     prompt_est = sum(len(m.get('content', '')) for m in messages) // 4
                     comp_est = len(full_text) // 4
                     self.db.record_tokens(config['id'], role, prompt_est, comp_est, user_id)
                 except Exception:
                     pass
+                # Record enhanced stats
+                if self._stats_engine:
+                    try:
+                        total_duration_ms = int((time.time() - start_time) * 1000)
+                        first_token_latency_ms = int((first_token_time - start_time) * 1000) if first_token_time else None
+                        self._stats_engine.record_call(
+                            user_id=user_id,
+                            agent_role=role,
+                            book_id=None,
+                            first_token_latency_ms=first_token_latency_ms,
+                            total_duration_ms=total_duration_ms,
+                            success=True,
+                            prompt_tokens=prompt_est,
+                            completion_tokens=comp_est
+                        )
+                    except Exception:
+                        pass
             else:
                 response = client.chat.completions.create(
                     model=model_id,
@@ -134,16 +164,53 @@ class AgentOrchestrator:
                     max_tokens=params['max_tokens'],
                 )
                 result = response.choices[0].message.content
+                prompt_est = 0
+                comp_est = 0
                 try:
                     usage = response.usage
                     if usage:
+                        prompt_est = usage.prompt_tokens
+                        comp_est = usage.completion_tokens
                         self.db.record_tokens(config['id'], role,
                                             usage.prompt_tokens, usage.completion_tokens, user_id)
                 except Exception:
                     pass
+                # Record enhanced stats
+                if self._stats_engine:
+                    try:
+                        total_duration_ms = int((time.time() - start_time) * 1000)
+                        self._stats_engine.record_call(
+                            user_id=user_id,
+                            agent_role=role,
+                            book_id=None,
+                            first_token_latency_ms=None,
+                            total_duration_ms=total_duration_ms,
+                            success=True,
+                            prompt_tokens=prompt_est,
+                            completion_tokens=comp_est
+                        )
+                    except Exception:
+                        pass
                 return result
         except Exception as e:
             err_msg = f"⚠️ API调用失败: {str(e)}"
+            # Record failure stats
+            if self._stats_engine:
+                try:
+                    total_duration_ms = int((time.time() - start_time) * 1000)
+                    first_token_latency_ms = int((first_token_time - start_time) * 1000) if first_token_time else None
+                    self._stats_engine.record_call(
+                        user_id=user_id,
+                        agent_role=role,
+                        book_id=None,
+                        first_token_latency_ms=first_token_latency_ms,
+                        total_duration_ms=total_duration_ms,
+                        success=False,
+                        prompt_tokens=0,
+                        completion_tokens=0
+                    )
+                except Exception:
+                    pass
             if stream:
                 yield err_msg
             else:
@@ -276,6 +343,14 @@ class AgentOrchestrator:
             memory_ctx=memory_ctx
         )
 
+        # Inject writing rules
+        rule_prompt = ""
+        if self._rule_engine and book_id:
+            try:
+                rule_prompt = self._rule_engine.build_rule_prompt(book_id, node_id)
+            except Exception:
+                pass
+
         # 动态注入
         inject_text = ""
         if previous_text and book_id:
@@ -298,7 +373,8 @@ class AgentOrchestrator:
 
 {memory_ctx}
 {character_ctx}
-{inject_text}"""},
+{inject_text}
+{rule_prompt}"""},
             {"role": "user", "content": f"""前文内容：
 {previous_text[-2000:] if previous_text else '（这是开篇）'}
 
@@ -363,6 +439,20 @@ class AgentOrchestrator:
         ]
 
         result = self._call_llm('validator', messages)
+
+        # Post-processing: ensure severity grading in issues
+        try:
+            import re as _re
+            json_match = _re.search(r'\{[\s\S]*\}', result)
+            if json_match:
+                parsed = json.loads(json_match.group())
+                issues = parsed.get('issues', [])
+                for issue in issues:
+                    if 'severity' not in issue:
+                        issue['severity'] = 'medium'
+                return {'validation': json.dumps(parsed, ensure_ascii=False)}
+        except Exception:
+            pass
         return {'validation': result}
 
     # ============== Agent 5: 润色 (Polisher) ==============
@@ -519,6 +609,14 @@ class AgentOrchestrator:
                     f"【{e['name']}】{e['content'][:200]}" for e in injected[:5]
                 ])
 
+        # Inject writing rules
+        rule_prompt = ""
+        if self._rule_engine and book_id:
+            try:
+                rule_prompt = self._rule_engine.build_rule_prompt(book_id, node_id)
+            except Exception:
+                pass
+
         # 获取大纲目标
         outline_ctx = ""
         if book_id:
@@ -541,7 +639,8 @@ class AgentOrchestrator:
 {memory_ctx}
 {character_ctx}
 {inject_text}
-{outline_ctx}"""},
+{outline_ctx}
+{rule_prompt}"""},
             {"role": "user", "content": f"""前文内容（截取最后部分）：
 {previous_text[-3000:] if previous_text else '（这是开篇）'}
 
@@ -639,6 +738,14 @@ class AgentOrchestrator:
                     f"【{e['name']}】{e['content'][:200]}" for e in injected[:5]
                 ])
 
+        # Inject writing rules
+        rule_prompt = ""
+        if self._rule_engine and book_id:
+            try:
+                rule_prompt = self._rule_engine.build_rule_prompt(book_id, node_id)
+            except Exception:
+                pass
+
         goal_prompt = f"\n用户期望方向：{goal}" if goal else ""
 
         messages = [
@@ -651,7 +758,8 @@ class AgentOrchestrator:
 {goal_prompt}
 {memory_ctx}
 {character_ctx}
-{inject_text}"""},
+{inject_text}
+{rule_prompt}"""},
             {"role": "user", "content": f"""前文：
 {previous_text[-3000:] if previous_text else '（开篇）'}
 
@@ -1626,3 +1734,233 @@ Hypothesis（假说/待验证文本）：
 
         for chunk in self._call_llm('drafter', messages, stream=True):
             yield chunk
+
+    # ============== NER 实体识别 Agent ==============
+
+    def run_ner_extract(self, data):
+        """NER 实体抽取: 从文本中识别实体并返回 JSON"""
+        text = data.get('text', '')
+        known_entities = data.get('known_entities', [])
+
+        if not text or len(text.strip()) < 20:
+            return {'entities': []}
+
+        known_ctx = ''
+        if known_entities:
+            known_list = [f"- {e['name']}（{e.get('type', '角色')}）" for e in known_entities[:30]]
+            known_ctx = f"\n\n已知实体（供参考对齐）：\n" + "\n".join(known_list)
+
+        messages = [
+            {"role": "system", "content": f"""你是一个中文小说实体识别专家。从给定文本中识别所有实体。
+
+实体类型：character（人物）、location（地点）、faction（组织/势力）、item（物品/法器/武器）、concept（概念/功法/境界）、event（事件）
+
+输出 JSON 数组，每个实体包含：
+[
+  {{
+    "text": "实体在原文中的文本",
+    "type": "实体类型",
+    "confidence": 0.0-1.0
+  }}
+]
+
+注意：
+1. 精确匹配原文，不做改写
+2. 同一实体只保留首次出现即可
+3. 代词（他、她、它）不作为独立实体
+4. confidence 反映确定程度
+{known_ctx}"""},
+            {"role": "user", "content": f"请识别以下文本中的实体：\n\n{text[:5000]}"}
+        ]
+
+        result = self._call_llm('validator', messages, stream=False)
+        return {'entities': result}
+
+    # ============== 共指消解 Agent ==============
+
+    def run_coreference_resolve(self, data):
+        """共指消解: 判断提及文本指代哪个角色"""
+        mentions = data.get('mentions', [])
+        context = data.get('context', '')
+        candidates = data.get('candidates', [])
+
+        if not mentions or not candidates:
+            return []
+
+        mention_ctx = '\n'.join([
+            f"- 「{m['text']}」（上下文: ...{m.get('context', '')[:100]}...）"
+            for m in mentions[:15]
+        ])
+        candidate_ctx = '\n'.join([
+            f"- {c['name']}（ID: {c['id']}）"
+            for c in candidates[:30]
+        ])
+
+        messages = [
+            {"role": "system", "content": f"""你是一个中文小说共指消解专家。给定待消解的称呼/代词列表和候选角色列表，判断每个称呼最可能指代哪个角色。
+
+输出 JSON 数组：
+[
+  {{
+    "mention_text": "原文提及",
+    "resolved_to": "角色全名",
+    "confidence": 0.0-1.0
+  }}
+]
+
+如果无法确定，confidence 设为低值。如果不是指代任何候选角色，则不输出该项。"""},
+            {"role": "user", "content": f"章节上下文（前 3000 字）：\n{context[:3000]}\n\n待消解的提及：\n{mention_ctx}\n\n候选角色：\n{candidate_ctx}"}
+        ]
+
+        result = self._call_llm('validator', messages, stream=False)
+        return result if isinstance(result, list) else []
+
+    # ============== 关系抽取 Agent ==============
+
+    def run_relation_extract(self, data):
+        """从文本中抽取实体间关系"""
+        text = data.get('text', '')
+        known_entities = data.get('known_entities', [])
+
+        if not text:
+            return {'relations': []}
+
+        entity_ctx = ''
+        if known_entities:
+            entity_ctx = '\n已知实体：' + '、'.join([e.get('name', '') for e in known_entities[:30]])
+
+        messages = [
+            {"role": "system", "content": f"""你是一位小说知识图谱专家。从文本中抽取实体间的关系。
+
+关系类型参考：belongs_to（隶属）、enemy_of（敌对）、ally_of（结盟）、family（亲属）、
+master_student（师徒）、lover（恋人）、possesses（持有）、located_in（位于）、
+subordinate（下属）、friend（朋友）、rival（对手）
+
+输出 JSON 数组：
+[
+  {{
+    "source": "实体A名称",
+    "target": "实体B名称",
+    "relation_type": "关系类型",
+    "relation_detail": "关系的具体描述（一句话）",
+    "evidence_text": "原文中支持该关系的文本片段",
+    "confidence": 0.0-1.0
+  }}
+]
+{entity_ctx}"""},
+            {"role": "user", "content": f"请从以下文本中抽取实体关系：\n\n{text[:5000]}"}
+        ]
+
+        result = self._call_llm('validator', messages, stream=False)
+        return {'relations': result}
+
+    # ============== 事件抽取 Agent ==============
+
+    def run_event_extract(self, data):
+        """从文本中抽取结构化故事事件"""
+        text = data.get('text', '')
+        known_entities = data.get('known_entities', [])
+
+        if not text:
+            return {'events': []}
+
+        entity_ctx = ''
+        if known_entities:
+            entity_ctx = '\n已知实体：' + '、'.join([e.get('name', '') for e in known_entities[:30]])
+
+        messages = [
+            {"role": "system", "content": f"""你是一位小说事件分析专家。从文本中抽取关键故事事件。
+
+输出 JSON 数组，每个事件包含：
+[
+  {{
+    "actor": "执行者名称",
+    "action": "事件描述（动作短语）",
+    "target": "事件对象/目标（可选）",
+    "location": "发生地点（可选）",
+    "story_time": "故事内时间（如有）",
+    "significance": 1-5,
+    "consequences": ["后果1", "后果2"],
+    "evidence_text": "原文片段"
+  }}
+]
+
+significance 含义：1=琐碎, 2=细节, 3=标准, 4=关键, 5=转折点
+{entity_ctx}"""},
+            {"role": "user", "content": f"请抽取以下文本中的故事事件：\n\n{text[:5000]}"}
+        ]
+
+        result = self._call_llm('validator', messages, stream=False)
+        return {'events': result}
+
+    # ============== 伏笔回收判断 Agent ==============
+
+    def run_payoff_judge(self, data):
+        """判断当前章节是否回收了某个伏笔"""
+        chapter_text = data.get('chapter_text', '')
+        foreshadow = data.get('foreshadow', {})
+
+        if not chapter_text or not foreshadow:
+            return {'is_payoff': False}
+
+        messages = [
+            {"role": "system", "content": """你是一位精通叙事结构的小说分析师。判断给定的章节文本是否回收了一个已埋设的伏笔。
+
+分析维度：
+1. 文本是否直接呼应或解答了伏笔中的悬念？
+2. 是否涉及了伏笔中的相关人物/物品/事件？
+3. 是完全解决还是部分推进？
+
+输出 JSON：
+{
+  "is_payoff": true/false,
+  "payoff_type": "resolved（完全回收）|partially_resolved（部分回收/推进）|strengthened（强化悬念）|not_payoff（无关）",
+  "confidence": 0.0-1.0,
+  "evidence_quote": "章节中回收伏笔的关键文本片段（50-100字）",
+  "reasoning": "判断理由（一句话）"
+}"""},
+            {"role": "user", "content": f"伏笔信息：\n标签: {foreshadow.get('label', '')}\n内容: {foreshadow.get('text', '')}\n描述: {foreshadow.get('description', '')}\n\n当前章节文本：\n{chapter_text[:5000]}"}
+        ]
+
+        result = self._call_llm('validator', messages, stream=False)
+        return result if isinstance(result, dict) else {'is_payoff': False}
+
+    # ============== 叙事弧光分析 Agent ==============
+
+    def run_narrative_analysis(self, data):
+        """分析章节的叙事指标"""
+        summary = data.get('summary', '')
+        chapter_title = data.get('chapter_title', '')
+
+        if not summary:
+            return {}
+
+        messages = [
+            {"role": "system", "content": """你是一位精通叙事理论的小说分析师。分析给定章节摘要的叙事特征。
+
+输出 JSON：
+{
+  "tension": 0-100（张力值，0=完全平静，100=极度紧张），
+  "conflict_level": 0-100（冲突强度），
+  "pacing": "slow|moderate|fast|climax"（节奏描述），
+  "emotions": {
+    "压抑": 0.0-1.0,
+    "紧张": 0.0-1.0,
+    "热血": 0.0-1.0,
+    "温柔": 0.0-1.0,
+    "悲伤": 0.0-1.0,
+    "释然": 0.0-1.0
+  },
+  "character_focus": [
+    {"name": "角色名", "presence": 0-100, "emotion": "主导情绪", "goal_status": "推进/受挫/达成"}
+  ],
+  "key_tension_point": "本章最核心的张力点描述（一句话）",
+  "overall_role": "铺垫|发展|高潮|过渡|收束"
+}
+
+注意所有情绪值和指标基于文本客观分析，不做主观评价。"""},
+            {"role": "user", "content": f"章节标题: {chapter_title}\n\n章节摘要/内容:\n{summary[:3000]}"}
+        ]
+
+        result = self._call_llm('validator', messages, stream=False)
+        return result if isinstance(result, dict) else {}

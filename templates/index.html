@@ -34,6 +34,16 @@
         </div>
         <div class="top-bar-right">
             <span class="user-pill" id="userPill" title="当前账号">未登录</span>
+            <button class="btn btn-sm btn-ghost" onclick="App.openGlobalSearch()" title="全局搜索">
+                <i class="fas fa-search"></i>
+            </button>
+            <button class="btn btn-sm btn-ghost" onclick="App.openConsistencyPanel()" title="全书体检">
+                <i class="fas fa-stethoscope"></i>
+            </button>
+            <button class="btn btn-sm btn-ghost job-center-btn" onclick="App.openJobCenter()" title="任务中心">
+                <i class="fas fa-tasks"></i>
+                <span class="job-badge" id="jobBadge" style="display:none;">0</span>
+            </button>
             <button class="btn btn-sm btn-ghost" onclick="App.showExportMenu()" title="导出">
                 <i class="fas fa-file-export"></i>
             </button>
@@ -65,6 +75,9 @@
                 </button>
                 <button class="panel-tab" data-tab="graph" onclick="App.switchLeftTab('graph')">
                     <i class="fas fa-diagram-project"></i> 图谱
+                </button>
+                <button class="panel-tab" data-tab="timeline" onclick="App.switchLeftTab('timeline')">
+                    <i class="fas fa-clock-rotate-left"></i> 时间线
                 </button>
             </div>
 
@@ -104,14 +117,60 @@
                 <div class="lorebook-list" id="lorebookList"></div>
             </div>
 
-            <!-- 实体图谱 -->
+            <!-- 实体图谱 (vis-network 增强) -->
             <div class="panel-content tab-content" id="tabGraph">
                 <div class="panel-toolbar">
                     <button class="btn btn-xs btn-primary" onclick="App.addRelation()">
                         <i class="fas fa-plus"></i> 添加关系
                     </button>
+                    <button class="btn btn-xs btn-ghost" onclick="App.extractKnowledge()">
+                        <i class="fas fa-project-diagram"></i> 抽取图谱
+                    </button>
+                    <button class="btn btn-xs btn-ghost" onclick="App.extractKnowledgeAll()">
+                        <i class="fas fa-layer-group"></i> 全书抽取
+                    </button>
+                    <select id="graphViewMode" onchange="App.switchGraphView(this.value)" class="select-xs" style="margin-left:auto;">
+                        <option value="visual">图形视图</option>
+                        <option value="table">表格视图</option>
+                    </select>
                 </div>
-                <div class="graph-container" id="entityGraph"></div>
+                <div class="graph-search-bar">
+                    <input type="text" id="graphSearchInput" placeholder="搜索实体..." onkeyup="App.filterGraph(this.value)">
+                </div>
+                <div class="graph-container" id="entityGraph" style="min-height:400px;"></div>
+                <div id="knowledgeGraphVis" style="width:100%;height:500px;display:none;"></div>
+                <div id="graphTableView" style="display:none;"></div>
+                <div id="graphEntityDetail" class="graph-entity-detail" style="display:none;"></div>
+            </div>
+
+            <!-- 时间线 -->
+            <div class="panel-content tab-content" id="tabTimeline">
+                <div class="panel-toolbar">
+                    <button class="btn btn-xs btn-primary" onclick="App.addTimelineEvent()">
+                        <i class="fas fa-plus"></i> 添加事件
+                    </button>
+                    <button class="btn btn-xs btn-ghost" onclick="App.extractTimelineEvents()">
+                        <i class="fas fa-wand-magic-sparkles"></i> 自动提取
+                    </button>
+                    <button class="btn btn-xs btn-ghost" onclick="App.detectTimelineConflicts()">
+                        <i class="fas fa-triangle-exclamation"></i> 冲突检测
+                    </button>
+                </div>
+                <div class="timeline-filters">
+                    <select id="timelineEntityFilter" onchange="App.loadTimeline()">
+                        <option value="">全部实体</option>
+                    </select>
+                    <select id="timelineTypeFilter" onchange="App.loadTimeline()">
+                        <option value="">全部类型</option>
+                        <option value="action">行动</option>
+                        <option value="state_change">状态变更</option>
+                        <option value="dialogue">对话</option>
+                        <option value="discovery">发现</option>
+                    </select>
+                </div>
+                <div class="timeline-list" id="timelineList">
+                    <p class="agent-hint"><i class="fas fa-clock-rotate-left"></i> 选择书籍后查看时间线事件</p>
+                </div>
             </div>
         </aside>
 
@@ -124,6 +183,12 @@
                     <span class="status-badge" id="statusBadge">草稿</span>
                 </div>
                 <div class="editor-toolbar-right">
+                    <button class="btn btn-xs btn-ghost" onclick="App.openSnapshots()" title="历史快照">
+                        <i class="fas fa-clock-rotate-left"></i>
+                    </button>
+                    <button class="btn btn-xs btn-ghost" onclick="App.startWorkflow()" title="一键工作流">
+                        <i class="fas fa-play-circle"></i>
+                    </button>
                     <button class="btn btn-xs btn-ghost" onclick="App.toggleVersions()" title="版本管理">
                         <i class="fas fa-code-branch"></i>
                     </button>
@@ -248,12 +313,31 @@
                 <button class="panel-tab" data-tab="memory" onclick="App.switchRightTab('memory')">
                     <i class="fas fa-database"></i> 记忆
                 </button>
+                <button class="panel-tab" data-tab="analysis" onclick="App.switchRightTab('analysis')">
+                    <i class="fas fa-chart-line"></i> 分析
+                </button>
             </div>
 
             <!-- Agent 工作台 -->
             <div class="panel-content tab-content active" id="tabAgent">
-                <!-- Agent 选择 -->
+                <!-- Agent 选择 - 分组标签页 -->
+                <div class="agent-group-tabs">
+                    <button class="agent-group-tab active" onclick="App.switchAgentGroup('planning')">
+                        <i class="fas fa-compass"></i> 规划
+                    </button>
+                    <button class="agent-group-tab" onclick="App.switchAgentGroup('writing')">
+                        <i class="fas fa-pen-nib"></i> 写作
+                    </button>
+                    <button class="agent-group-tab" onclick="App.switchAgentGroup('validation')">
+                        <i class="fas fa-shield-check"></i> 校验
+                    </button>
+                    <button class="agent-group-tab" onclick="App.switchAgentGroup('analysis')">
+                        <i class="fas fa-chart-line"></i> 分析
+                    </button>
+                </div>
                 <div class="agent-selector">
+                    <!-- 规划类 -->
+                    <div class="agent-group active" data-group="planning">
                     <button class="agent-btn active" data-agent="planner" onclick="App.selectAgent('planner')">
                         <i class="fas fa-sitemap"></i>
                         <span>架构师</span>
@@ -261,22 +345,6 @@
                     <button class="agent-btn" data-agent="beats" onclick="App.selectAgent('beats')">
                         <i class="fas fa-music"></i>
                         <span>节拍器</span>
-                    </button>
-                    <button class="agent-btn" data-agent="drafter" onclick="App.selectAgent('drafter')">
-                        <i class="fas fa-pen-nib"></i>
-                        <span>执笔者</span>
-                    </button>
-                    <button class="agent-btn" data-agent="validator" onclick="App.selectAgent('validator')">
-                        <i class="fas fa-check-double"></i>
-                        <span>验证者</span>
-                    </button>
-                    <button class="agent-btn" data-agent="polisher" onclick="App.selectAgent('polisher')">
-                        <i class="fas fa-gem"></i>
-                        <span>润色</span>
-                    </button>
-                    <button class="agent-btn" data-agent="continuation" onclick="App.selectAgent('continuation')">
-                        <i class="fas fa-forward"></i>
-                        <span>续写</span>
                     </button>
                     <button class="agent-btn" data-agent="conflict" onclick="App.selectAgent('conflict')">
                         <i class="fas fa-fire"></i>
@@ -286,10 +354,47 @@
                         <i class="fas fa-lightbulb"></i>
                         <span>联想</span>
                     </button>
+                    </div>
+                    <!-- 写作类 -->
+                    <div class="agent-group" data-group="writing">
+                    <button class="agent-btn" data-agent="drafter" onclick="App.selectAgent('drafter')">
+                        <i class="fas fa-pen-nib"></i>
+                        <span>执笔者</span>
+                    </button>
+                    <button class="agent-btn" data-agent="continuation" onclick="App.selectAgent('continuation')">
+                        <i class="fas fa-forward"></i>
+                        <span>续写</span>
+                    </button>
+                    <button class="agent-btn" data-agent="polisher" onclick="App.selectAgent('polisher')">
+                        <i class="fas fa-gem"></i>
+                        <span>润色</span>
+                    </button>
+                    <button class="agent-btn" data-agent="plansolve" onclick="App.selectAgent('plansolve')">
+                        <i class="fas fa-layer-group"></i>
+                        <span>Plan模式</span>
+                    </button>
+                    </div>
+                    <!-- 校验类 -->
+                    <div class="agent-group" data-group="validation">
+                    <button class="agent-btn" data-agent="validator" onclick="App.selectAgent('validator')">
+                        <i class="fas fa-check-double"></i>
+                        <span>验证者</span>
+                    </button>
+                    <button class="agent-btn" data-agent="hallcheck" onclick="App.selectAgent('hallcheck')">
+                        <i class="fas fa-shield-halved"></i>
+                        <span>幻觉检测</span>
+                    </button>
+                    <button class="agent-btn" data-agent="worldstate" onclick="App.selectAgent('worldstate')">
+                        <i class="fas fa-globe"></i>
+                        <span>世界态</span>
+                    </button>
                     <button class="agent-btn" data-agent="foreshadow" onclick="App.selectAgent('foreshadow')">
                         <i class="fas fa-eye"></i>
                         <span>伏笔</span>
                     </button>
+                    </div>
+                    <!-- 分析类 -->
+                    <div class="agent-group" data-group="analysis">
                     <button class="agent-btn" data-agent="subtext" onclick="App.selectAgent('subtext')">
                         <i class="fas fa-masks-theater"></i>
                         <span>潜台词</span>
@@ -298,18 +403,7 @@
                         <i class="fas fa-brain"></i>
                         <span>心理</span>
                     </button>
-                    <button class="agent-btn" data-agent="worldstate" onclick="App.selectAgent('worldstate')">
-                        <i class="fas fa-globe"></i>
-                        <span>世界态</span>
-                    </button>
-                    <button class="agent-btn" data-agent="plansolve" onclick="App.selectAgent('plansolve')">
-                        <i class="fas fa-layer-group"></i>
-                        <span>Plan模式</span>
-                    </button>
-                    <button class="agent-btn" data-agent="hallcheck" onclick="App.selectAgent('hallcheck')">
-                        <i class="fas fa-shield-halved"></i>
-                        <span>幻觉检测</span>
-                    </button>
+                    </div>
                 </div>
 
                 <!-- 各Agent面板 -->
@@ -704,8 +798,26 @@
                         </div>
                     </div>
                     <button class="btn btn-xs btn-primary" onclick="App.buildVectorIndex()" style="margin-top:6px;">
-                        <i class="fas fa-database"></i> 构建向量索引
+                        <i class="fas fa-database"></i> TF-IDF 索引
                     </button>
+                    <button class="btn btn-xs btn-ghost" onclick="App.buildEmbeddingIndex()" style="margin-top:6px;">
+                        <i class="fas fa-brain"></i> Embedding 索引
+                    </button>
+                    <div id="embeddingStatus" class="memory-helper-text" style="margin-top:4px;"></div>
+                </div>
+
+                <!-- NER 实体识别 -->
+                <div class="memory-section">
+                    <h4><i class="fas fa-tags"></i> 实体识别</h4>
+                    <div class="panel-toolbar">
+                        <button class="btn btn-xs btn-primary" onclick="App.runNER()">
+                            <i class="fas fa-search"></i> 识别当前章节
+                        </button>
+                        <button class="btn btn-xs btn-ghost" onclick="App.runNERAll()">
+                            <i class="fas fa-layer-group"></i> 全书识别
+                        </button>
+                    </div>
+                    <div id="nerEntityList" class="ner-entity-list"></div>
                 </div>
 
                 <div class="memory-section">
@@ -769,6 +881,57 @@
                     <div id="entityResults" class="entity-results"></div>
                 </div>
             </div>
+
+            <!-- 故事分析面板 -->
+            <div class="panel-content tab-content" id="tabAnalysis">
+                <div class="analysis-toolbar">
+                    <button class="btn btn-xs btn-primary" onclick="App.analyzeChapter()">
+                        <i class="fas fa-chart-bar"></i> 分析当前章节
+                    </button>
+                    <button class="btn btn-xs btn-ghost" onclick="App.analyzeBook()">
+                        <i class="fas fa-layer-group"></i> 全书分析
+                    </button>
+                    <button class="btn btn-xs btn-ghost" onclick="App.scanPayoffs()">
+                        <i class="fas fa-puzzle-piece"></i> 扫描伏笔回收
+                    </button>
+                </div>
+
+                <div class="analysis-section">
+                    <h4><i class="fas fa-chart-line"></i> 张力曲线</h4>
+                    <div id="tensionChart" class="chart-container"></div>
+                </div>
+
+                <div class="analysis-section">
+                    <h4><i class="fas fa-palette"></i> 情绪构成</h4>
+                    <div id="emotionChart" class="chart-container"></div>
+                </div>
+
+                <div class="analysis-section">
+                    <h4><i class="fas fa-users"></i> 角色弧线</h4>
+                    <div id="characterArcChart" class="chart-container"></div>
+                </div>
+
+                <div class="analysis-section">
+                    <h4><i class="fas fa-puzzle-piece"></i> 伏笔分布</h4>
+                    <div id="foreshadowDistChart" class="chart-container"></div>
+                </div>
+
+                <div class="analysis-section">
+                    <h4><i class="fas fa-stethoscope"></i> 节奏诊断</h4>
+                    <div id="pacingDiagnosis" class="pacing-diagnosis"></div>
+                </div>
+
+                <div class="analysis-section">
+                    <h4><i class="fas fa-star"></i> 弧光完整度</h4>
+                    <div id="arcCompleteness" class="arc-completeness"></div>
+                </div>
+
+                <!-- 伏笔回收结果 -->
+                <div class="analysis-section" id="payoffResultsSection" style="display:none;">
+                    <h4><i class="fas fa-check-circle"></i> 伏笔回收检测</h4>
+                    <div id="payoffResults" class="payoff-results"></div>
+                </div>
+            </div>
         </aside>
     </main>
 
@@ -784,7 +947,9 @@
                     <button class="settings-tab active" onclick="App.switchSettingsTab('models')">模型管理</button>
                     <button class="settings-tab" onclick="App.switchSettingsTab('routing')">任务路由</button>
                     <button class="settings-tab" onclick="App.switchSettingsTab('params')">生成参数</button>
+                    <button class="settings-tab" onclick="App.switchSettingsTab('rules')">写作规则</button>
                     <button class="settings-tab" onclick="App.switchSettingsTab('tokens')">Token 统计</button>
+                    <button class="settings-tab" onclick="App.switchSettingsTab('stats')">统计面板</button>
                 </div>
 
                 <!-- 模型管理 -->
@@ -887,6 +1052,28 @@
                 <!-- Token统计 -->
                 <div class="settings-content" id="settingsTokens">
                     <div class="token-stats" id="tokenStats"></div>
+                </div>
+
+                <!-- 写作规则中心 -->
+                <div class="settings-content" id="settingsRules">
+                    <div class="settings-toolbar">
+                        <button class="btn btn-sm btn-primary" onclick="App.addRuleSet()">
+                            <i class="fas fa-plus"></i> 新建规则集
+                        </button>
+                        <button class="btn btn-sm btn-ghost" onclick="App.checkRuleConflicts()">
+                            <i class="fas fa-triangle-exclamation"></i> 冲突检查
+                        </button>
+                    </div>
+                    <div class="rule-sets-list" id="ruleSetsList">
+                        <p class="settings-hint">选择书籍后管理写作规则。规则可按书/卷/章设置作用域。</p>
+                    </div>
+                </div>
+
+                <!-- 统计面板 -->
+                <div class="settings-content" id="settingsStats">
+                    <div class="stats-dashboard" id="statsDashboard">
+                        <p class="settings-hint">Agent 调用统计、延迟、采纳率等数据。</p>
+                    </div>
                 </div>
             </div>
         </div>
@@ -1095,6 +1282,228 @@
     <!-- Toast 通知 -->
     <div class="toast-container" id="toastContainer"></div>
 
+    <!-- ========== 模态框：全局搜索 ========== -->
+    <div class="modal-overlay" id="searchModal" style="display:none;">
+        <div class="modal modal-lg">
+            <div class="modal-header">
+                <h3><i class="fas fa-search"></i> 全局搜索</h3>
+                <button class="btn btn-ghost modal-close" onclick="App.closeGlobalSearch()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="search-controls">
+                    <input type="text" id="globalSearchInput" placeholder="搜索内容..."
+                           onkeydown="if(event.key==='Enter') App.doGlobalSearch()">
+                    <select id="globalSearchScope">
+                        <option value="">全部范围</option>
+                        <option value="content">正文</option>
+                        <option value="summary">摘要</option>
+                        <option value="lorebook">设定</option>
+                        <option value="character_history">角色历史</option>
+                        <option value="world_state">世界状态</option>
+                    </select>
+                    <button class="btn btn-primary" onclick="App.doGlobalSearch()">
+                        <i class="fas fa-search"></i> 搜索
+                    </button>
+                </div>
+                <div class="search-actions" style="margin-top:8px;">
+                    <button class="btn btn-sm btn-ghost" onclick="App.showReplacePanel()">
+                        <i class="fas fa-exchange-alt"></i> 查找替换
+                    </button>
+                </div>
+                <div class="replace-panel" id="replacePanel" style="display:none;margin-top:8px;">
+                    <input type="text" id="replaceSearchText" placeholder="查找内容">
+                    <input type="text" id="replaceNewText" placeholder="替换为">
+                    <button class="btn btn-sm btn-warning" onclick="App.previewReplace()">预览</button>
+                    <button class="btn btn-sm btn-danger" onclick="App.executeReplace()">执行替换</button>
+                </div>
+                <div class="search-results" id="globalSearchResults"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== 模态框：一致性报告 ========== -->
+    <div class="modal-overlay" id="consistencyModal" style="display:none;">
+        <div class="modal modal-lg">
+            <div class="modal-header">
+                <h3><i class="fas fa-stethoscope"></i> 全书体检</h3>
+                <button class="btn btn-ghost modal-close" onclick="App.closeConsistencyPanel()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="consistency-toolbar">
+                    <button class="btn btn-primary" onclick="App.runConsistencyScan()">
+                        <i class="fas fa-play"></i> 发起扫描
+                    </button>
+                    <span class="consistency-status" id="consistencyStatus">未扫描</span>
+                </div>
+                <div class="consistency-summary" id="consistencySummary" style="display:none;">
+                    <div class="severity-badges">
+                        <span class="severity-badge high"><i class="fas fa-circle-exclamation"></i> 高 <b id="consistencyHigh">0</b></span>
+                        <span class="severity-badge medium"><i class="fas fa-exclamation"></i> 中 <b id="consistencyMedium">0</b></span>
+                        <span class="severity-badge low"><i class="fas fa-info-circle"></i> 低 <b id="consistencyLow">0</b></span>
+                    </div>
+                </div>
+                <div class="consistency-issues" id="consistencyIssues"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== 模态框：任务中心 ========== -->
+    <div class="modal-overlay" id="jobModal" style="display:none;">
+        <div class="modal modal-lg">
+            <div class="modal-header">
+                <h3><i class="fas fa-tasks"></i> 任务中心</h3>
+                <button class="btn btn-ghost modal-close" onclick="App.closeJobCenter()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="job-list" id="jobList">
+                    <p class="settings-hint">暂无进行中的任务</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== 模态框：工作流 ========== -->
+    <div class="modal-overlay" id="workflowModal" style="display:none;">
+        <div class="modal modal-lg">
+            <div class="modal-header">
+                <h3><i class="fas fa-play-circle"></i> 章节工作流</h3>
+                <button class="btn btn-ghost modal-close" onclick="App.closeWorkflow()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="workflow-goals">
+                    <label>本章目标</label>
+                    <textarea id="workflowGoals" rows="2" placeholder="描述本章要达成的目标..."></textarea>
+                </div>
+                <div class="workflow-steps" id="workflowSteps"></div>
+                <div class="workflow-actions">
+                    <button class="btn btn-primary" onclick="App.runWorkflowStep()">
+                        <i class="fas fa-play"></i> 执行下一步
+                    </button>
+                    <button class="btn btn-ghost" onclick="App.closeWorkflow()">关闭</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== 模态框：快照管理 ========== -->
+    <div class="modal-overlay" id="snapshotModal" style="display:none;">
+        <div class="modal modal-lg">
+            <div class="modal-header">
+                <h3><i class="fas fa-clock-rotate-left"></i> 历史快照</h3>
+                <button class="btn btn-ghost modal-close" onclick="App.closeSnapshots()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="snapshot-tabs">
+                    <button class="snapshot-tab active" onclick="App.switchSnapshotTab('snapshots')">快照</button>
+                    <button class="snapshot-tab" onclick="App.switchSnapshotTab('recycle')">回收站</button>
+                </div>
+                <div class="snapshot-content" id="snapshotList">
+                    <p class="settings-hint">暂无快照记录</p>
+                </div>
+                <div class="snapshot-content" id="recycleList" style="display:none;">
+                    <p class="settings-hint">回收站为空</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== 模态框：导入 ========== -->
+    <div class="modal-overlay" id="importModal" style="display:none;">
+        <div class="modal">
+            <div class="modal-header">
+                <h3><i class="fas fa-file-import"></i> 导入</h3>
+                <button class="btn btn-ghost modal-close" onclick="App.closeImportDialog()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="import-options">
+                    <div class="import-option" onclick="document.getElementById('importFileInput').click()">
+                        <i class="fas fa-file-upload"></i>
+                        <span>选择文件</span>
+                        <small>支持 JSON / Markdown / TXT / DOCX</small>
+                    </div>
+                    <input type="file" id="importFileInput" style="display:none"
+                           accept=".json,.md,.txt,.docx" onchange="App.handleImportFile(event)">
+                </div>
+                <div class="import-preview" id="importPreview" style="display:none;">
+                    <h4>导入预览</h4>
+                    <div class="import-preview-content" id="importPreviewContent"></div>
+                    <div class="form-group">
+                        <label>书名</label>
+                        <input type="text" id="importBookTitle" placeholder="导入后的书籍名称">
+                    </div>
+                    <div class="form-actions">
+                        <button class="btn btn-primary" onclick="App.confirmImport()">确认导入</button>
+                        <button class="btn btn-ghost" onclick="App.closeImportDialog()">取消</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== 模态框：规则编辑 ========== -->
+    <div class="modal-overlay" id="ruleEditModal" style="display:none;">
+        <div class="modal">
+            <div class="modal-header">
+                <h3><i class="fas fa-gavel"></i> 编辑规则</h3>
+                <button class="btn btn-ghost modal-close" onclick="App.closeRuleEditModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <input type="hidden" id="ruleEditId">
+                <input type="hidden" id="ruleEditSetId">
+                <div class="form-group">
+                    <label>规则标题</label>
+                    <input type="text" id="ruleTitle" placeholder="如：禁止出现现代用语">
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>类别</label>
+                        <select id="ruleCategory">
+                            <option value="style">文风</option>
+                            <option value="narrative">叙事</option>
+                            <option value="character_speech">角色语言</option>
+                            <option value="format">格式</option>
+                            <option value="prohibition">禁用</option>
+                            <option value="hard_lock">硬设定</option>
+                            <option value="exception">例外</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>作用域</label>
+                        <select id="ruleScope">
+                            <option value="book">全书</option>
+                            <option value="volume">当前卷</option>
+                            <option value="chapter">当前章</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>规则内容</label>
+                    <textarea id="ruleContent" rows="4" placeholder="详细描述规则要求..."></textarea>
+                </div>
+                <div class="form-actions">
+                    <button class="btn btn-primary" onclick="App.saveRule()">保存</button>
+                    <button class="btn btn-ghost" onclick="App.closeRuleEditModal()">取消</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== 模态框：记忆注入日志 ========== -->
+    <div class="modal-overlay" id="injectionLogModal" style="display:none;">
+        <div class="modal modal-lg">
+            <div class="modal-header">
+                <h3><i class="fas fa-syringe"></i> 记忆注入详情</h3>
+                <button class="btn btn-ghost modal-close" onclick="App.closeInjectionLog()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="injection-log-content" id="injectionLogContent">
+                    <p class="settings-hint">暂无注入记录</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/vis-network@9/standalone/umd/vis-network.min.js"></script>
     <script src="/static/js/app.js"></script>
 </body>
 </html>

@@ -21,11 +21,19 @@ KEY_PATH = os.path.join(os.path.dirname(__file__), '.encryption_key')
 
 def get_cipher():
     if os.path.exists(KEY_PATH):
+        # 启动时修正权限为 owner-only
+        try:
+            current_mode = os.stat(KEY_PATH).st_mode & 0o777
+            if current_mode != 0o600:
+                os.chmod(KEY_PATH, 0o600)
+        except OSError:
+            pass
         with open(KEY_PATH, 'rb') as f:
             key = f.read()
     else:
         key = Fernet.generate_key()
-        with open(KEY_PATH, 'wb') as f:
+        fd = os.open(KEY_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'wb') as f:
             f.write(key)
     return Fernet(key)
 
@@ -318,10 +326,397 @@ class Database:
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )''')
 
+        # ========== 新增表：写作规则中心 ==========
+        c.execute('''CREATE TABLE IF NOT EXISTS writing_rule_sets (
+            id TEXT PRIMARY KEY,
+            book_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            enabled INTEGER DEFAULT 1,
+            priority INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        )''')
+
+        c.execute('''CREATE TABLE IF NOT EXISTS writing_rules (
+            id TEXT PRIMARY KEY,
+            rule_set_id TEXT NOT NULL,
+            book_id TEXT NOT NULL,
+            category TEXT NOT NULL DEFAULT 'style',
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            scope_type TEXT DEFAULT 'book',
+            scope_node_id TEXT,
+            enabled INTEGER DEFAULT 1,
+            priority INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (rule_set_id) REFERENCES writing_rule_sets(id) ON DELETE CASCADE,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        )''')
+
+        # ========== 新增表：时间线与事件账本 ==========
+        c.execute('''CREATE TABLE IF NOT EXISTS timeline_events (
+            id TEXT PRIMARY KEY,
+            book_id TEXT NOT NULL,
+            node_id TEXT,
+            event_type TEXT NOT NULL DEFAULT 'action',
+            entity_name TEXT NOT NULL,
+            description TEXT NOT NULL,
+            location TEXT DEFAULT '',
+            chapter_index INTEGER DEFAULT 0,
+            event_order INTEGER DEFAULT 0,
+            source TEXT DEFAULT 'auto',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        )''')
+
+        c.execute('''CREATE TABLE IF NOT EXISTS entity_state_transitions (
+            id TEXT PRIMARY KEY,
+            book_id TEXT NOT NULL,
+            entity_name TEXT NOT NULL,
+            state_type TEXT NOT NULL DEFAULT 'location',
+            old_value TEXT DEFAULT '',
+            new_value TEXT NOT NULL,
+            cause_event_id TEXT,
+            start_node_id TEXT,
+            end_node_id TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        )''')
+
+        # ========== 新增表：快照与回收站 ==========
+        c.execute('''CREATE TABLE IF NOT EXISTS snapshots (
+            id TEXT PRIMARY KEY,
+            book_id TEXT NOT NULL,
+            node_id TEXT,
+            snapshot_type TEXT NOT NULL DEFAULT 'manual',
+            label TEXT DEFAULT '',
+            content_data TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        )''')
+
+        c.execute('''CREATE TABLE IF NOT EXISTS recycle_bin (
+            id TEXT PRIMARY KEY,
+            book_id TEXT NOT NULL,
+            item_type TEXT NOT NULL,
+            item_id TEXT NOT NULL,
+            item_data TEXT NOT NULL,
+            deleted_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        )''')
+
+        # ========== 新增表：异步任务中心 ==========
+        c.execute('''CREATE TABLE IF NOT EXISTS async_jobs (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            book_id TEXT,
+            job_type TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            progress INTEGER DEFAULT 0,
+            total_steps INTEGER DEFAULT 0,
+            current_step INTEGER DEFAULT 0,
+            result_summary TEXT DEFAULT '',
+            error_message TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            started_at TEXT,
+            completed_at TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )''')
+
+        c.execute('''CREATE TABLE IF NOT EXISTS job_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT NOT NULL,
+            level TEXT DEFAULT 'info',
+            message TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (job_id) REFERENCES async_jobs(id) ON DELETE CASCADE
+        )''')
+
+        # ========== 新增表：记忆注入日志 ==========
+        c.execute('''CREATE TABLE IF NOT EXISTS memory_injection_logs (
+            id TEXT PRIMARY KEY,
+            book_id TEXT NOT NULL,
+            node_id TEXT,
+            agent_role TEXT NOT NULL,
+            injected_items TEXT NOT NULL DEFAULT '[]',
+            candidate_items TEXT DEFAULT '[]',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        )''')
+
+        c.execute('''CREATE TABLE IF NOT EXISTS pinned_memories (
+            id TEXT PRIMARY KEY,
+            book_id TEXT NOT NULL,
+            memory_type TEXT NOT NULL,
+            memory_ref TEXT NOT NULL,
+            action TEXT NOT NULL DEFAULT 'pin',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        )''')
+
+        # ========== 新增表：一致性报告 ==========
+        c.execute('''CREATE TABLE IF NOT EXISTS consistency_reports (
+            id TEXT PRIMARY KEY,
+            book_id TEXT NOT NULL,
+            status TEXT DEFAULT 'running',
+            issue_count INTEGER DEFAULT 0,
+            high_count INTEGER DEFAULT 0,
+            medium_count INTEGER DEFAULT 0,
+            low_count INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            completed_at TEXT,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        )''')
+
+        c.execute('''CREATE TABLE IF NOT EXISTS consistency_issues (
+            id TEXT PRIMARY KEY,
+            report_id TEXT NOT NULL,
+            book_id TEXT NOT NULL,
+            issue_type TEXT NOT NULL,
+            severity TEXT NOT NULL DEFAULT 'medium',
+            title TEXT NOT NULL,
+            description TEXT NOT NULL,
+            evidence TEXT DEFAULT '[]',
+            related_node_ids TEXT DEFAULT '[]',
+            related_entities TEXT DEFAULT '[]',
+            resolution TEXT DEFAULT 'open',
+            resolution_note TEXT DEFAULT '',
+            FOREIGN KEY (report_id) REFERENCES consistency_reports(id) ON DELETE CASCADE,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        )''')
+
+        # ========== 新增表：章节工作流 ==========
+        c.execute('''CREATE TABLE IF NOT EXISTS workflow_templates (
+            id TEXT PRIMARY KEY,
+            book_id TEXT,
+            user_id TEXT,
+            name TEXT NOT NULL,
+            steps TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )''')
+
+        c.execute('''CREATE TABLE IF NOT EXISTS workflow_runs (
+            id TEXT PRIMARY KEY,
+            book_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            template_id TEXT,
+            status TEXT DEFAULT 'running',
+            current_step INTEGER DEFAULT 0,
+            step_results TEXT DEFAULT '[]',
+            goals TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            completed_at TEXT,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        )''')
+
+        # ========== 新增表：增强统计 ==========
+        c.execute('''CREATE TABLE IF NOT EXISTS enhanced_stats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            book_id TEXT,
+            agent_role TEXT NOT NULL,
+            first_token_latency_ms INTEGER,
+            total_duration_ms INTEGER,
+            success INTEGER DEFAULT 1,
+            retried INTEGER DEFAULT 0,
+            adopted INTEGER DEFAULT 0,
+            prompt_tokens INTEGER DEFAULT 0,
+            completion_tokens INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )''')
+
+        # ========== 新增表：Embedding 索引 ==========
+        c.execute('''CREATE TABLE IF NOT EXISTS embedding_chunks (
+            id TEXT PRIMARY KEY,
+            book_id TEXT NOT NULL,
+            source_type TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            chunk_index INTEGER DEFAULT 0,
+            chunk_text TEXT NOT NULL,
+            embedding BLOB,
+            metadata TEXT DEFAULT '{}',
+            created_at TEXT,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        )''')
+
+        c.execute('''CREATE TABLE IF NOT EXISTS embedding_index_meta (
+            book_id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            dim INTEGER NOT NULL,
+            chunk_count INTEGER NOT NULL,
+            model_id TEXT NOT NULL,
+            last_built_at TEXT,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        )''')
+
+        # ========== 新增表：NER 实体识别 ==========
+        c.execute('''CREATE TABLE IF NOT EXISTS extracted_entities (
+            id TEXT PRIMARY KEY,
+            book_id TEXT NOT NULL,
+            node_id TEXT,
+            entity_text TEXT NOT NULL,
+            entity_type TEXT NOT NULL,
+            start_pos INTEGER,
+            end_pos INTEGER,
+            confidence REAL DEFAULT 0.5,
+            source_type TEXT DEFAULT 'auto',
+            status TEXT DEFAULT 'pending',
+            linked_lorebook_id TEXT,
+            link_confidence REAL DEFAULT 0.0,
+            created_at TEXT,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        )''')
+
+        c.execute('''CREATE TABLE IF NOT EXISTS entity_mentions (
+            id TEXT PRIMARY KEY,
+            book_id TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            mention_text TEXT NOT NULL,
+            start_pos INTEGER,
+            end_pos INTEGER,
+            context_snippet TEXT DEFAULT '',
+            mention_type TEXT DEFAULT 'name',
+            created_at TEXT,
+            FOREIGN KEY (entity_id) REFERENCES extracted_entities(id) ON DELETE CASCADE
+        )''')
+
+        # ========== 新增表：消歧与共指 ==========
+        c.execute('''CREATE TABLE IF NOT EXISTS disambiguation_feedback (
+            id TEXT PRIMARY KEY,
+            book_id TEXT NOT NULL,
+            mention_text TEXT NOT NULL,
+            resolved_character_id TEXT NOT NULL,
+            scope TEXT DEFAULT 'book',
+            scope_node_id TEXT,
+            created_at TEXT,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        )''')
+
+        c.execute('''CREATE TABLE IF NOT EXISTS coreference_links (
+            id TEXT PRIMARY KEY,
+            book_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            mention_id TEXT NOT NULL,
+            resolved_character_id TEXT NOT NULL,
+            confidence REAL DEFAULT 0.5,
+            resolution_method TEXT DEFAULT 'rule',
+            created_at TEXT,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        )''')
+
+        # ========== 新增表：知识图谱 ==========
+        c.execute('''CREATE TABLE IF NOT EXISTS knowledge_nodes (
+            id TEXT PRIMARY KEY,
+            book_id TEXT NOT NULL,
+            entity_name TEXT NOT NULL,
+            entity_type TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            linked_lorebook_id TEXT,
+            properties TEXT DEFAULT '{}',
+            first_seen_node TEXT,
+            last_seen_node TEXT,
+            mention_count INTEGER DEFAULT 0,
+            created_at TEXT,
+            updated_at TEXT,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        )''')
+
+        c.execute('''CREATE TABLE IF NOT EXISTS knowledge_edges (
+            id TEXT PRIMARY KEY,
+            book_id TEXT NOT NULL,
+            source_node_id TEXT NOT NULL,
+            target_node_id TEXT NOT NULL,
+            relation_type TEXT NOT NULL,
+            relation_detail TEXT DEFAULT '',
+            evidence_text TEXT DEFAULT '',
+            evidence_node_id TEXT,
+            confidence REAL DEFAULT 0.5,
+            status TEXT DEFAULT 'auto',
+            valid_from_chapter INTEGER,
+            valid_until_chapter INTEGER,
+            created_at TEXT,
+            FOREIGN KEY (source_node_id) REFERENCES knowledge_nodes(id) ON DELETE CASCADE,
+            FOREIGN KEY (target_node_id) REFERENCES knowledge_nodes(id) ON DELETE CASCADE
+        )''')
+
+        c.execute('''CREATE TABLE IF NOT EXISTS story_events (
+            id TEXT PRIMARY KEY,
+            book_id TEXT NOT NULL,
+            node_id TEXT,
+            actor_node_id TEXT,
+            action TEXT NOT NULL,
+            target_node_id TEXT,
+            location_node_id TEXT,
+            story_time TEXT DEFAULT '',
+            significance INTEGER DEFAULT 3,
+            consequences TEXT DEFAULT '[]',
+            participants TEXT DEFAULT '[]',
+            evidence_text TEXT DEFAULT '',
+            chapter_index INTEGER DEFAULT 0,
+            created_at TEXT,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        )''')
+
+        # ========== 新增表：伏笔回填 ==========
+        c.execute('''CREATE TABLE IF NOT EXISTS foreshadow_payoff_links (
+            id TEXT PRIMARY KEY,
+            book_id TEXT NOT NULL,
+            foreshadow_id TEXT NOT NULL,
+            payoff_node_id TEXT NOT NULL,
+            payoff_type TEXT NOT NULL,
+            confidence REAL DEFAULT 0.5,
+            evidence_text TEXT DEFAULT '',
+            auto_detected INTEGER DEFAULT 1,
+            created_at TEXT,
+            FOREIGN KEY (foreshadow_id) REFERENCES foreshadowing(id) ON DELETE CASCADE
+        )''')
+
+        # ========== 新增表：叙事弧光分析 ==========
+        c.execute('''CREATE TABLE IF NOT EXISTS narrative_analysis (
+            id TEXT PRIMARY KEY,
+            book_id TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            chapter_index INTEGER DEFAULT 0,
+            chapter_title TEXT DEFAULT '',
+            tension INTEGER DEFAULT 50,
+            conflict_level INTEGER DEFAULT 50,
+            pacing TEXT DEFAULT 'moderate',
+            emotions TEXT DEFAULT '{}',
+            character_focus TEXT DEFAULT '[]',
+            overall_role TEXT DEFAULT '',
+            key_tension_point TEXT DEFAULT '',
+            analyzed_at TEXT,
+            FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+        )''')
+
         # 兼容历史库的字段迁移
         self._ensure_column(conn, 'models', 'user_id', 'TEXT')
         self._ensure_column(conn, 'books', 'user_id', 'TEXT')
         self._ensure_column(conn, 'token_stats', 'user_id', 'TEXT')
+
+        # 版本分支增强
+        self._ensure_column(conn, 'versions', 'label_name', 'TEXT DEFAULT ""')
+        self._ensure_column(conn, 'versions', 'description', 'TEXT DEFAULT ""')
+        self._ensure_column(conn, 'versions', 'source_type', 'TEXT DEFAULT "manual"')
+        self._ensure_column(conn, 'versions', 'is_candidate', 'INTEGER DEFAULT 0')
+
+        # 人物提醒增强
+        self._ensure_column(conn, 'lorebook', 'aliases', 'TEXT DEFAULT ""')
+        self._ensure_column(conn, 'lorebook', 'keyword_weights', 'TEXT DEFAULT "{}"')
+
+        # 世界状态增强
+        self._ensure_column(conn, 'world_state', 'source_node_id', 'TEXT DEFAULT ""')
+        self._ensure_column(conn, 'world_state', 'source_type', 'TEXT DEFAULT "manual"')
+        self._ensure_column(conn, 'world_state', 'superseded_by', 'TEXT')
+        self._ensure_column(conn, 'world_state', 'valid_from_node', 'TEXT DEFAULT ""')
+        self._ensure_column(conn, 'world_state', 'valid_until_node', 'TEXT')
+
+        # 伏笔表增强：回填字段
+        self._ensure_column(conn, 'foreshadowing', 'payoff_type', 'TEXT')
+        self._ensure_column(conn, 'foreshadowing', 'payoff_evidence', 'TEXT DEFAULT ""')
 
         # 初始化默认生成参数
         c.execute('INSERT OR IGNORE INTO generation_params (id) VALUES (1)')
@@ -359,10 +754,10 @@ class Database:
         result = []
         for r in rows:
             d = dict(r)
-            d['api_key'] = decrypt(d.pop('api_key_enc', ''))
-            # 只显示部分 key
-            if d['api_key'] and len(d['api_key']) > 8:
-                d['api_key_display'] = d['api_key'][:4] + '****' + d['api_key'][-4:]
+            full_key = decrypt(d.pop('api_key_enc', ''))
+            # 只返回掩码形式，不返回完整 key
+            if full_key and len(full_key) > 8:
+                d['api_key_display'] = full_key[:4] + '****' + full_key[-4:]
             else:
                 d['api_key_display'] = '****'
             result.append(d)
@@ -1158,3 +1553,1100 @@ class Database:
             'psychology': psychology,
             'character_history': character_history,
         }
+
+    # ============== 写作规则中心 ==============
+
+    def get_writing_rule_sets(self, book_id):
+        conn = self._conn()
+        rows = conn.execute('SELECT * FROM writing_rule_sets WHERE book_id=? ORDER BY priority DESC, created_at',
+                            (book_id,)).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def create_writing_rule_set(self, data):
+        sid = str(uuid.uuid4())[:8]
+        now = datetime.now().isoformat()
+        conn = self._conn()
+        conn.execute('''INSERT INTO writing_rule_sets (id, book_id, name, description, enabled, priority, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                     (sid, data['book_id'], data.get('name', ''), data.get('description', ''),
+                      data.get('enabled', 1), data.get('priority', 0), now, now))
+        conn.commit()
+        conn.close()
+        return sid
+
+    def update_writing_rule_set(self, set_id, data):
+        conn = self._conn()
+        fields, vals = [], []
+        for k in ['name', 'description', 'enabled', 'priority']:
+            if k in data:
+                fields.append(f'{k}=?')
+                vals.append(data[k])
+        fields.append('updated_at=?')
+        vals.append(datetime.now().isoformat())
+        vals.append(set_id)
+        conn.execute(f'UPDATE writing_rule_sets SET {",".join(fields)} WHERE id=?', vals)
+        conn.commit()
+        conn.close()
+
+    def delete_writing_rule_set(self, set_id):
+        conn = self._conn()
+        conn.execute('DELETE FROM writing_rule_sets WHERE id=?', (set_id,))
+        conn.commit()
+        conn.close()
+
+    def get_writing_rules(self, book_id, rule_set_id=None, category=None):
+        conn = self._conn()
+        query = 'SELECT * FROM writing_rules WHERE book_id=?'
+        vals = [book_id]
+        if rule_set_id:
+            query += ' AND rule_set_id=?'
+            vals.append(rule_set_id)
+        if category:
+            query += ' AND category=?'
+            vals.append(category)
+        query += ' ORDER BY priority DESC, created_at'
+        rows = conn.execute(query, tuple(vals)).fetchall()
+        conn.close()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d['content'] = decrypt(d.get('content', ''))
+            d['title'] = decrypt(d.get('title', ''))
+            result.append(d)
+        return result
+
+    def add_writing_rule(self, data):
+        rid = str(uuid.uuid4())[:8]
+        conn = self._conn()
+        conn.execute('''INSERT INTO writing_rules (id, rule_set_id, book_id, category, title, content,
+                        scope_type, scope_node_id, enabled, priority, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                     (rid, data['rule_set_id'], data['book_id'], data.get('category', 'style'),
+                      encrypt(data.get('title', '')), encrypt(data.get('content', '')),
+                      data.get('scope_type', 'book'), data.get('scope_node_id'),
+                      data.get('enabled', 1), data.get('priority', 0),
+                      datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
+        return rid
+
+    def update_writing_rule(self, rule_id, data):
+        conn = self._conn()
+        fields, vals = [], []
+        encrypted_fields = {'title', 'content'}
+        for k in ['category', 'title', 'content', 'scope_type', 'scope_node_id', 'enabled', 'priority']:
+            if k in data:
+                fields.append(f'{k}=?')
+                vals.append(encrypt(data[k]) if k in encrypted_fields else data[k])
+        vals.append(rule_id)
+        conn.execute(f'UPDATE writing_rules SET {",".join(fields)} WHERE id=?', vals)
+        conn.commit()
+        conn.close()
+
+    def delete_writing_rule(self, rule_id):
+        conn = self._conn()
+        conn.execute('DELETE FROM writing_rules WHERE id=?', (rule_id,))
+        conn.commit()
+        conn.close()
+
+    # ============== 时间线与事件账本 ==============
+
+    def get_timeline_events(self, book_id, entity_name=None, node_id=None, event_type=None):
+        conn = self._conn()
+        query = 'SELECT * FROM timeline_events WHERE book_id=?'
+        vals = [book_id]
+        if entity_name:
+            query += ' AND entity_name=?'
+            vals.append(entity_name)
+        if node_id:
+            query += ' AND node_id=?'
+            vals.append(node_id)
+        if event_type:
+            query += ' AND event_type=?'
+            vals.append(event_type)
+        query += ' ORDER BY chapter_index, event_order'
+        rows = conn.execute(query, tuple(vals)).fetchall()
+        conn.close()
+        result = []
+        for r in rows:
+            d = dict(r)
+            self._decrypt_fields(d, ['description', 'location'])
+            result.append(d)
+        return result
+
+    def add_timeline_event(self, data):
+        eid = str(uuid.uuid4())[:8]
+        conn = self._conn()
+        conn.execute('''INSERT INTO timeline_events (id, book_id, node_id, event_type, entity_name,
+                        description, location, chapter_index, event_order, source, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                     (eid, data['book_id'], data.get('node_id'), data.get('event_type', 'action'),
+                      data['entity_name'], encrypt(data.get('description', '')),
+                      encrypt(data.get('location', '')),
+                      data.get('chapter_index', 0), data.get('event_order', 0),
+                      data.get('source', 'auto'), datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
+        return eid
+
+    def update_timeline_event(self, event_id, data):
+        conn = self._conn()
+        fields, vals = [], []
+        encrypted_fields = {'description', 'location'}
+        for k in ['event_type', 'entity_name', 'description', 'location', 'chapter_index', 'event_order', 'source']:
+            if k in data:
+                fields.append(f'{k}=?')
+                vals.append(encrypt(data[k]) if k in encrypted_fields else data[k])
+        vals.append(event_id)
+        conn.execute(f'UPDATE timeline_events SET {",".join(fields)} WHERE id=?', vals)
+        conn.commit()
+        conn.close()
+
+    def delete_timeline_event(self, event_id):
+        conn = self._conn()
+        conn.execute('DELETE FROM timeline_events WHERE id=?', (event_id,))
+        conn.commit()
+        conn.close()
+
+    def delete_timeline_events_for_node(self, book_id, node_id):
+        conn = self._conn()
+        conn.execute('DELETE FROM timeline_events WHERE book_id=? AND node_id=? AND source=?',
+                     (book_id, node_id, 'auto'))
+        conn.commit()
+        conn.close()
+
+    def get_entity_state_transitions(self, book_id, entity_name=None):
+        conn = self._conn()
+        query = 'SELECT * FROM entity_state_transitions WHERE book_id=?'
+        vals = [book_id]
+        if entity_name:
+            query += ' AND entity_name=?'
+            vals.append(entity_name)
+        query += ' ORDER BY created_at'
+        rows = conn.execute(query, tuple(vals)).fetchall()
+        conn.close()
+        result = []
+        for r in rows:
+            d = dict(r)
+            self._decrypt_fields(d, ['old_value', 'new_value'])
+            result.append(d)
+        return result
+
+    def add_entity_state_transition(self, data):
+        tid = str(uuid.uuid4())[:8]
+        conn = self._conn()
+        conn.execute('''INSERT INTO entity_state_transitions (id, book_id, entity_name, state_type,
+                        old_value, new_value, cause_event_id, start_node_id, end_node_id, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                     (tid, data['book_id'], data['entity_name'], data.get('state_type', 'location'),
+                      encrypt(data.get('old_value', '')), encrypt(data.get('new_value', '')),
+                      data.get('cause_event_id'), data.get('start_node_id'),
+                      data.get('end_node_id'), datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
+        return tid
+
+    # ============== 快照与回收站 ==============
+
+    def get_snapshots(self, book_id, node_id=None, limit=50):
+        conn = self._conn()
+        query = 'SELECT id, book_id, node_id, snapshot_type, label, created_at FROM snapshots WHERE book_id=?'
+        vals = [book_id]
+        if node_id:
+            query += ' AND node_id=?'
+            vals.append(node_id)
+        query += ' ORDER BY created_at DESC LIMIT ?'
+        vals.append(limit)
+        rows = conn.execute(query, tuple(vals)).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def get_snapshot(self, snapshot_id):
+        conn = self._conn()
+        row = conn.execute('SELECT * FROM snapshots WHERE id=?', (snapshot_id,)).fetchone()
+        conn.close()
+        if not row:
+            return None
+        d = dict(row)
+        d['content_data'] = decrypt(d.get('content_data', ''))
+        return d
+
+    def create_snapshot(self, data):
+        sid = str(uuid.uuid4())[:8]
+        conn = self._conn()
+        conn.execute('''INSERT INTO snapshots (id, book_id, node_id, snapshot_type, label, content_data, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                     (sid, data['book_id'], data.get('node_id'), data.get('snapshot_type', 'manual'),
+                      data.get('label', ''), encrypt(json.dumps(data.get('content_data', {}), ensure_ascii=False)),
+                      datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
+        return sid
+
+    def delete_snapshot(self, snapshot_id):
+        conn = self._conn()
+        conn.execute('DELETE FROM snapshots WHERE id=?', (snapshot_id,))
+        conn.commit()
+        conn.close()
+
+    def cleanup_snapshots(self, book_id, keep_count=50):
+        conn = self._conn()
+        conn.execute('''DELETE FROM snapshots WHERE id IN (
+            SELECT id FROM snapshots WHERE book_id=? ORDER BY created_at DESC LIMIT -1 OFFSET ?
+        )''', (book_id, keep_count))
+        conn.commit()
+        conn.close()
+
+    def get_recycle_bin(self, book_id):
+        conn = self._conn()
+        rows = conn.execute('SELECT id, book_id, item_type, item_id, deleted_at FROM recycle_bin WHERE book_id=? ORDER BY deleted_at DESC',
+                            (book_id,)).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def add_to_recycle_bin(self, data):
+        rid = str(uuid.uuid4())[:8]
+        conn = self._conn()
+        conn.execute('''INSERT INTO recycle_bin (id, book_id, item_type, item_id, item_data, deleted_at)
+                        VALUES (?, ?, ?, ?, ?, ?)''',
+                     (rid, data['book_id'], data['item_type'], data['item_id'],
+                      encrypt(json.dumps(data.get('item_data', {}), ensure_ascii=False)),
+                      datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
+        return rid
+
+    def get_recycle_bin_item(self, recycle_id):
+        conn = self._conn()
+        row = conn.execute('SELECT * FROM recycle_bin WHERE id=?', (recycle_id,)).fetchone()
+        conn.close()
+        if not row:
+            return None
+        d = dict(row)
+        d['item_data'] = decrypt(d.get('item_data', ''))
+        return d
+
+    def delete_recycle_bin_item(self, recycle_id):
+        conn = self._conn()
+        conn.execute('DELETE FROM recycle_bin WHERE id=?', (recycle_id,))
+        conn.commit()
+        conn.close()
+
+    # ============== 异步任务中心 ==============
+
+    def get_async_jobs(self, user_id, status=None, limit=50):
+        conn = self._conn()
+        query = 'SELECT * FROM async_jobs WHERE user_id=?'
+        vals = [user_id]
+        if status:
+            query += ' AND status=?'
+            vals.append(status)
+        query += ' ORDER BY created_at DESC LIMIT ?'
+        vals.append(limit)
+        rows = conn.execute(query, tuple(vals)).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def get_async_job(self, job_id):
+        conn = self._conn()
+        row = conn.execute('SELECT * FROM async_jobs WHERE id=?', (job_id,)).fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def create_async_job(self, data):
+        jid = str(uuid.uuid4())[:8]
+        conn = self._conn()
+        conn.execute('''INSERT INTO async_jobs (id, user_id, book_id, job_type, status,
+                        total_steps, created_at)
+                        VALUES (?, ?, ?, ?, 'pending', ?, ?)''',
+                     (jid, data['user_id'], data.get('book_id'), data['job_type'],
+                      data.get('total_steps', 0), datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
+        return jid
+
+    def update_async_job(self, job_id, data):
+        conn = self._conn()
+        fields, vals = [], []
+        for k in ['status', 'progress', 'current_step', 'total_steps', 'result_summary',
+                   'error_message', 'started_at', 'completed_at']:
+            if k in data:
+                fields.append(f'{k}=?')
+                vals.append(data[k])
+        vals.append(job_id)
+        conn.execute(f'UPDATE async_jobs SET {",".join(fields)} WHERE id=?', vals)
+        conn.commit()
+        conn.close()
+
+    def add_job_log(self, job_id, level, message):
+        conn = self._conn()
+        conn.execute('''INSERT INTO job_logs (job_id, level, message, created_at)
+                        VALUES (?, ?, ?, ?)''', (job_id, level, message, datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
+
+    def get_job_logs(self, job_id, limit=100):
+        conn = self._conn()
+        rows = conn.execute('SELECT * FROM job_logs WHERE job_id=? ORDER BY created_at DESC LIMIT ?',
+                            (job_id, limit)).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    # ============== 记忆注入日志 ==============
+
+    def save_memory_injection_log(self, data):
+        lid = str(uuid.uuid4())[:8]
+        conn = self._conn()
+        conn.execute('''INSERT INTO memory_injection_logs (id, book_id, node_id, agent_role,
+                        injected_items, candidate_items, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                     (lid, data['book_id'], data.get('node_id'), data['agent_role'],
+                      json.dumps(data.get('injected_items', []), ensure_ascii=False),
+                      json.dumps(data.get('candidate_items', []), ensure_ascii=False),
+                      datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
+        return lid
+
+    def get_memory_injection_logs(self, book_id, node_id=None, limit=10):
+        conn = self._conn()
+        query = 'SELECT * FROM memory_injection_logs WHERE book_id=?'
+        vals = [book_id]
+        if node_id:
+            query += ' AND node_id=?'
+            vals.append(node_id)
+        query += ' ORDER BY created_at DESC LIMIT ?'
+        vals.append(limit)
+        rows = conn.execute(query, tuple(vals)).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def get_pinned_memories(self, book_id):
+        conn = self._conn()
+        rows = conn.execute('SELECT * FROM pinned_memories WHERE book_id=? ORDER BY created_at',
+                            (book_id,)).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def add_pinned_memory(self, data):
+        pid = str(uuid.uuid4())[:8]
+        conn = self._conn()
+        conn.execute('''INSERT INTO pinned_memories (id, book_id, memory_type, memory_ref, action, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?)''',
+                     (pid, data['book_id'], data['memory_type'], data['memory_ref'],
+                      data.get('action', 'pin'), datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
+        return pid
+
+    def delete_pinned_memory(self, pin_id):
+        conn = self._conn()
+        conn.execute('DELETE FROM pinned_memories WHERE id=?', (pin_id,))
+        conn.commit()
+        conn.close()
+
+    # ============== 一致性报告 ==============
+
+    def create_consistency_report(self, data):
+        rid = str(uuid.uuid4())[:8]
+        conn = self._conn()
+        conn.execute('''INSERT INTO consistency_reports (id, book_id, status, created_at)
+                        VALUES (?, ?, 'running', ?)''',
+                     (rid, data['book_id'], datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
+        return rid
+
+    def update_consistency_report(self, report_id, data):
+        conn = self._conn()
+        fields, vals = [], []
+        for k in ['status', 'issue_count', 'high_count', 'medium_count', 'low_count', 'completed_at']:
+            if k in data:
+                fields.append(f'{k}=?')
+                vals.append(data[k])
+        vals.append(report_id)
+        conn.execute(f'UPDATE consistency_reports SET {",".join(fields)} WHERE id=?', vals)
+        conn.commit()
+        conn.close()
+
+    def get_consistency_reports(self, book_id):
+        conn = self._conn()
+        rows = conn.execute('SELECT * FROM consistency_reports WHERE book_id=? ORDER BY created_at DESC',
+                            (book_id,)).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def get_consistency_report(self, report_id):
+        conn = self._conn()
+        row = conn.execute('SELECT * FROM consistency_reports WHERE id=?', (report_id,)).fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def add_consistency_issue(self, data):
+        iid = str(uuid.uuid4())[:8]
+        conn = self._conn()
+        conn.execute('''INSERT INTO consistency_issues (id, report_id, book_id, issue_type, severity,
+                        title, description, evidence, related_node_ids, related_entities)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                     (iid, data['report_id'], data['book_id'], data['issue_type'],
+                      data.get('severity', 'medium'), encrypt(data.get('title', '')),
+                      encrypt(data.get('description', '')),
+                      json.dumps(data.get('evidence', []), ensure_ascii=False),
+                      json.dumps(data.get('related_node_ids', []), ensure_ascii=False),
+                      json.dumps(data.get('related_entities', []), ensure_ascii=False)))
+        conn.commit()
+        conn.close()
+        return iid
+
+    def get_consistency_issues(self, report_id=None, book_id=None, resolution=None):
+        conn = self._conn()
+        query = 'SELECT * FROM consistency_issues WHERE 1=1'
+        vals = []
+        if report_id:
+            query += ' AND report_id=?'
+            vals.append(report_id)
+        if book_id:
+            query += ' AND book_id=?'
+            vals.append(book_id)
+        if resolution:
+            query += ' AND resolution=?'
+            vals.append(resolution)
+        query += ' ORDER BY CASE severity WHEN "high" THEN 0 WHEN "medium" THEN 1 ELSE 2 END'
+        rows = conn.execute(query, tuple(vals)).fetchall()
+        conn.close()
+        result = []
+        for r in rows:
+            d = dict(r)
+            self._decrypt_fields(d, ['title', 'description'])
+            result.append(d)
+        return result
+
+    def update_consistency_issue(self, issue_id, data):
+        conn = self._conn()
+        fields, vals = [], []
+        for k in ['resolution', 'resolution_note']:
+            if k in data:
+                fields.append(f'{k}=?')
+                vals.append(data[k])
+        vals.append(issue_id)
+        conn.execute(f'UPDATE consistency_issues SET {",".join(fields)} WHERE id=?', vals)
+        conn.commit()
+        conn.close()
+
+    # ============== 章节工作流 ==============
+
+    def get_workflow_templates(self, user_id=None, book_id=None):
+        conn = self._conn()
+        query = 'SELECT * FROM workflow_templates WHERE 1=1'
+        vals = []
+        if user_id:
+            query += ' AND (user_id=? OR user_id IS NULL)'
+            vals.append(user_id)
+        if book_id:
+            query += ' AND (book_id=? OR book_id IS NULL)'
+            vals.append(book_id)
+        rows = conn.execute(query, tuple(vals)).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def create_workflow_template(self, data):
+        tid = str(uuid.uuid4())[:8]
+        conn = self._conn()
+        conn.execute('''INSERT INTO workflow_templates (id, book_id, user_id, name, steps, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?)''',
+                     (tid, data.get('book_id'), data.get('user_id'), data['name'],
+                      json.dumps(data.get('steps', []), ensure_ascii=False),
+                      datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
+        return tid
+
+    def create_workflow_run(self, data):
+        rid = str(uuid.uuid4())[:8]
+        conn = self._conn()
+        conn.execute('''INSERT INTO workflow_runs (id, book_id, node_id, template_id, status,
+                        goals, created_at)
+                        VALUES (?, ?, ?, ?, 'running', ?, ?)''',
+                     (rid, data['book_id'], data['node_id'], data.get('template_id'),
+                      data.get('goals', ''), datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
+        return rid
+
+    def get_workflow_run(self, run_id):
+        conn = self._conn()
+        row = conn.execute('SELECT * FROM workflow_runs WHERE id=?', (run_id,)).fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def update_workflow_run(self, run_id, data):
+        conn = self._conn()
+        fields, vals = [], []
+        for k in ['status', 'current_step', 'step_results', 'completed_at']:
+            if k in data:
+                fields.append(f'{k}=?')
+                vals.append(data[k])
+        vals.append(run_id)
+        conn.execute(f'UPDATE workflow_runs SET {",".join(fields)} WHERE id=?', vals)
+        conn.commit()
+        conn.close()
+
+    # ============== 增强统计 ==============
+
+    def record_enhanced_stat(self, data):
+        conn = self._conn()
+        conn.execute('''INSERT INTO enhanced_stats (user_id, book_id, agent_role,
+                        first_token_latency_ms, total_duration_ms, success, retried, adopted,
+                        prompt_tokens, completion_tokens, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                     (data['user_id'], data.get('book_id'), data['agent_role'],
+                      data.get('first_token_latency_ms'), data.get('total_duration_ms'),
+                      data.get('success', 1), data.get('retried', 0), data.get('adopted', 0),
+                      data.get('prompt_tokens', 0), data.get('completion_tokens', 0),
+                      datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
+
+    def get_enhanced_stats(self, user_id, book_id=None):
+        conn = self._conn()
+        query = '''SELECT agent_role,
+                   COUNT(*) as call_count,
+                   SUM(CASE WHEN success=1 THEN 1 ELSE 0 END) as success_count,
+                   SUM(CASE WHEN retried=1 THEN 1 ELSE 0 END) as retry_count,
+                   SUM(CASE WHEN adopted=1 THEN 1 ELSE 0 END) as adopt_count,
+                   AVG(first_token_latency_ms) as avg_first_token_ms,
+                   AVG(total_duration_ms) as avg_duration_ms,
+                   SUM(prompt_tokens) as total_prompt_tokens,
+                   SUM(completion_tokens) as total_completion_tokens
+                   FROM enhanced_stats WHERE user_id=?'''
+        vals = [user_id]
+        if book_id:
+            query += ' AND book_id=?'
+            vals.append(book_id)
+        query += ' GROUP BY agent_role ORDER BY call_count DESC'
+        rows = conn.execute(query, tuple(vals)).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def mark_stat_adopted(self, user_id, agent_role, book_id=None):
+        conn = self._conn()
+        query = '''UPDATE enhanced_stats SET adopted=1 WHERE id=(
+                   SELECT id FROM enhanced_stats WHERE user_id=? AND agent_role=?'''
+        vals = [user_id, agent_role]
+        if book_id:
+            query += ' AND book_id=?'
+            vals.append(book_id)
+        query += ' ORDER BY created_at DESC LIMIT 1)'
+        conn.execute(query, tuple(vals))
+        conn.commit()
+        conn.close()
+
+    # ============== 世界状态增强 ==============
+
+    def get_world_state_history(self, book_id, entity_name=None):
+        conn = self._conn()
+        query = 'SELECT * FROM world_state WHERE book_id=? ORDER BY updated_at DESC'
+        vals = [book_id]
+        if entity_name:
+            query = 'SELECT * FROM world_state WHERE book_id=? AND entity_name=? ORDER BY updated_at DESC'
+            vals.append(entity_name)
+        rows = conn.execute(query, tuple(vals)).fetchall()
+        conn.close()
+        result = []
+        for r in rows:
+            d = dict(r)
+            self._decrypt_fields(d, ['state_value', 'scene_context'])
+            result.append(d)
+        return result
+
+    def get_current_world_state(self, book_id, entity_name=None):
+        conn = self._conn()
+        query = 'SELECT * FROM world_state WHERE book_id=? AND superseded_by IS NULL'
+        vals = [book_id]
+        if entity_name:
+            query += ' AND entity_name=?'
+            vals.append(entity_name)
+        query += ' ORDER BY updated_at DESC'
+        rows = conn.execute(query, tuple(vals)).fetchall()
+        conn.close()
+        result = []
+        for r in rows:
+            d = dict(r)
+            self._decrypt_fields(d, ['state_value', 'scene_context'])
+            result.append(d)
+        return result
+
+    def upsert_world_state_v2(self, data):
+        conn = self._conn()
+        row = conn.execute('''SELECT id FROM world_state WHERE book_id=? AND entity_name=?
+                             AND state_type=? AND superseded_by IS NULL''',
+                           (data['book_id'], data['entity_name'], data['state_type'])).fetchone()
+        now = datetime.now().isoformat()
+        new_id = str(uuid.uuid4())[:8]
+        if row:
+            conn.execute('UPDATE world_state SET superseded_by=? WHERE id=?', (new_id, row['id']))
+        conn.execute('''INSERT INTO world_state (id, book_id, entity_name, state_type, state_value,
+                       scene_context, last_updated_node, source_node_id, source_type,
+                       valid_from_node, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                     (new_id, data['book_id'], data['entity_name'], data['state_type'],
+                      encrypt(data.get('state_value', '')), encrypt(data.get('scene_context', '')),
+                      data.get('last_updated_node', ''), data.get('source_node_id', ''),
+                      data.get('source_type', 'manual'), data.get('valid_from_node', ''), now))
+        conn.commit()
+        conn.close()
+        return new_id
+
+    # ============== 版本分支增强 ==============
+
+    def create_version_v2(self, data):
+        vid = str(uuid.uuid4())[:8]
+        conn = self._conn()
+        conn.execute('''INSERT INTO versions (id, node_id, label, content, is_active, label_name,
+                        description, source_type, is_candidate, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                     (vid, data['node_id'], data.get('label', 'A'),
+                      encrypt(data.get('content', '')), data.get('is_active', 0),
+                      data.get('label_name', ''), data.get('description', ''),
+                      data.get('source_type', 'manual'), data.get('is_candidate', 0),
+                      datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
+        return vid
+
+    def update_version(self, ver_id, data):
+        conn = self._conn()
+        fields, vals = [], []
+        for k in ['label_name', 'description', 'source_type', 'is_candidate']:
+            if k in data:
+                fields.append(f'{k}=?')
+                vals.append(data[k])
+        if 'content' in data:
+            fields.append('content=?')
+            vals.append(encrypt(data['content']))
+        vals.append(ver_id)
+        conn.execute(f'UPDATE versions SET {",".join(fields)} WHERE id=?', vals)
+        conn.commit()
+        conn.close()
+
+    # ============== 全书节点遍历（供搜索使用）==============
+
+    def get_all_node_contents(self, book_id):
+        conn = self._conn()
+        rows = conn.execute('''SELECT n.id, n.title, n.type, n.sort_order, nc.content
+                               FROM nodes n LEFT JOIN node_contents nc ON n.id = nc.node_id
+                               WHERE n.book_id=? ORDER BY n.sort_order''',
+                            (book_id,)).fetchall()
+        conn.close()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d['content'] = decrypt(d.get('content', '') or '')
+            result.append(d)
+        return result
+
+    # ============== Embedding 索引 ==============
+
+    def save_embedding_chunks(self, chunks):
+        conn = self._conn()
+        for ch in chunks:
+            conn.execute(
+                '''INSERT OR REPLACE INTO embedding_chunks
+                   (id, book_id, source_type, source_id, chunk_index, chunk_text, embedding, metadata, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                (ch['id'], ch['book_id'], ch['source_type'], ch['source_id'],
+                 ch.get('chunk_index', 0), ch['chunk_text'],
+                 ch.get('embedding'), json.dumps(ch.get('metadata', {}), ensure_ascii=False),
+                 ch.get('created_at', datetime.now().isoformat()))
+            )
+        conn.commit()
+        conn.close()
+
+    def get_embedding_chunks(self, book_id, source_type=None):
+        conn = self._conn()
+        if source_type:
+            rows = conn.execute(
+                'SELECT * FROM embedding_chunks WHERE book_id=? AND source_type=? ORDER BY chunk_index',
+                (book_id, source_type)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                'SELECT * FROM embedding_chunks WHERE book_id=? ORDER BY source_type, chunk_index',
+                (book_id,)
+            ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def delete_embedding_chunks_by_source(self, book_id, source_type=None, source_id=None):
+        conn = self._conn()
+        if source_id:
+            conn.execute('DELETE FROM embedding_chunks WHERE book_id=? AND source_id=?', (book_id, source_id))
+        elif source_type:
+            conn.execute('DELETE FROM embedding_chunks WHERE book_id=? AND source_type=?', (book_id, source_type))
+        else:
+            conn.execute('DELETE FROM embedding_chunks WHERE book_id=?', (book_id,))
+        conn.commit()
+        conn.close()
+
+    def save_index_meta(self, meta):
+        conn = self._conn()
+        conn.execute(
+            '''INSERT OR REPLACE INTO embedding_index_meta
+               (book_id, user_id, dim, chunk_count, model_id, last_built_at)
+               VALUES (?, ?, ?, ?, ?, ?)''',
+            (meta['book_id'], meta['user_id'], meta['dim'],
+             meta['chunk_count'], meta['model_id'],
+             meta.get('last_built_at', datetime.now().isoformat()))
+        )
+        conn.commit()
+        conn.close()
+
+    def get_index_meta(self, book_id):
+        conn = self._conn()
+        row = conn.execute('SELECT * FROM embedding_index_meta WHERE book_id=?', (book_id,)).fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    # ============== NER 实体识别 ==============
+
+    def add_extracted_entity(self, entity):
+        conn = self._conn()
+        conn.execute(
+            '''INSERT OR REPLACE INTO extracted_entities
+               (id, book_id, node_id, entity_text, entity_type, start_pos, end_pos,
+                confidence, source_type, status, linked_lorebook_id, link_confidence, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (entity['id'], entity['book_id'], entity.get('node_id'),
+             entity['entity_text'], entity['entity_type'],
+             entity.get('start_pos'), entity.get('end_pos'),
+             entity.get('confidence', 0.5), entity.get('source_type', 'auto'),
+             entity.get('status', 'pending'), entity.get('linked_lorebook_id'),
+             entity.get('link_confidence', 0.0),
+             entity.get('created_at', datetime.now().isoformat()))
+        )
+        conn.commit()
+        conn.close()
+
+    def get_extracted_entities(self, book_id, node_id=None, entity_type=None, status=None):
+        conn = self._conn()
+        query = 'SELECT * FROM extracted_entities WHERE book_id=?'
+        vals = [book_id]
+        if node_id:
+            query += ' AND node_id=?'
+            vals.append(node_id)
+        if entity_type:
+            query += ' AND entity_type=?'
+            vals.append(entity_type)
+        if status:
+            query += ' AND status=?'
+            vals.append(status)
+        query += ' ORDER BY created_at DESC'
+        rows = conn.execute(query, tuple(vals)).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def update_entity_status(self, entity_id, status):
+        conn = self._conn()
+        conn.execute('UPDATE extracted_entities SET status=? WHERE id=?', (status, entity_id))
+        conn.commit()
+        conn.close()
+
+    def link_entity_to_lorebook(self, entity_id, lorebook_id, confidence=0.9):
+        conn = self._conn()
+        conn.execute(
+            'UPDATE extracted_entities SET linked_lorebook_id=?, link_confidence=?, status=? WHERE id=?',
+            (lorebook_id, confidence, 'confirmed', entity_id)
+        )
+        conn.commit()
+        conn.close()
+
+    def delete_entities_for_node(self, book_id, node_id):
+        conn = self._conn()
+        conn.execute('DELETE FROM extracted_entities WHERE book_id=? AND node_id=?', (book_id, node_id))
+        conn.execute('DELETE FROM entity_mentions WHERE book_id=? AND node_id=?', (book_id, node_id))
+        conn.commit()
+        conn.close()
+
+    def get_unlinked_entities(self, book_id):
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT * FROM extracted_entities WHERE book_id=? AND linked_lorebook_id IS NULL AND status != 'dismissed' ORDER BY confidence DESC",
+            (book_id,)
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def add_entity_mention(self, mention):
+        conn = self._conn()
+        conn.execute(
+            '''INSERT INTO entity_mentions
+               (id, book_id, entity_id, node_id, mention_text, start_pos, end_pos,
+                context_snippet, mention_type, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (mention['id'], mention['book_id'], mention['entity_id'],
+             mention['node_id'], mention['mention_text'],
+             mention.get('start_pos'), mention.get('end_pos'),
+             mention.get('context_snippet', ''), mention.get('mention_type', 'name'),
+             mention.get('created_at', datetime.now().isoformat()))
+        )
+        conn.commit()
+        conn.close()
+
+    def get_entity_mentions(self, book_id, entity_id=None, node_id=None):
+        conn = self._conn()
+        query = 'SELECT * FROM entity_mentions WHERE book_id=?'
+        vals = [book_id]
+        if entity_id:
+            query += ' AND entity_id=?'
+            vals.append(entity_id)
+        if node_id:
+            query += ' AND node_id=?'
+            vals.append(node_id)
+        rows = conn.execute(query, tuple(vals)).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    # ============== 消歧与共指 ==============
+
+    def add_disambiguation_feedback(self, record):
+        conn = self._conn()
+        conn.execute(
+            '''INSERT INTO disambiguation_feedback
+               (id, book_id, mention_text, resolved_character_id, scope, scope_node_id, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)''',
+            (record['id'], record['book_id'], record['mention_text'],
+             record['resolved_character_id'], record.get('scope', 'book'),
+             record.get('scope_node_id'),
+             record.get('created_at', datetime.now().isoformat()))
+        )
+        conn.commit()
+        conn.close()
+
+    def get_disambiguation_feedbacks(self, book_id):
+        conn = self._conn()
+        rows = conn.execute(
+            'SELECT * FROM disambiguation_feedback WHERE book_id=? ORDER BY created_at DESC',
+            (book_id,)
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def delete_disambiguation_feedback(self, feedback_id):
+        conn = self._conn()
+        conn.execute('DELETE FROM disambiguation_feedback WHERE id=?', (feedback_id,))
+        conn.commit()
+        conn.close()
+
+    def add_coreference_link(self, link):
+        conn = self._conn()
+        conn.execute(
+            '''INSERT INTO coreference_links
+               (id, book_id, node_id, mention_id, resolved_character_id, confidence, resolution_method, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+            (link['id'], link['book_id'], link['node_id'], link.get('mention_id', ''),
+             link['resolved_character_id'], link.get('confidence', 0.5),
+             link.get('resolution_method', 'rule'),
+             link.get('created_at', datetime.now().isoformat()))
+        )
+        conn.commit()
+        conn.close()
+
+    # ============== 知识图谱 ==============
+
+    def add_knowledge_node(self, node):
+        conn = self._conn()
+        now = datetime.now().isoformat()
+        conn.execute(
+            '''INSERT OR REPLACE INTO knowledge_nodes
+               (id, book_id, entity_name, entity_type, description, linked_lorebook_id,
+                properties, first_seen_node, last_seen_node, mention_count, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (node['id'], node['book_id'], node['entity_name'], node['entity_type'],
+             node.get('description', ''), node.get('linked_lorebook_id'),
+             json.dumps(node.get('properties', {}), ensure_ascii=False),
+             node.get('first_seen_node'), node.get('last_seen_node'),
+             node.get('mention_count', 0),
+             node.get('created_at', now), now)
+        )
+        conn.commit()
+        conn.close()
+
+    def get_knowledge_nodes(self, book_id, entity_type=None):
+        conn = self._conn()
+        if entity_type:
+            rows = conn.execute(
+                'SELECT * FROM knowledge_nodes WHERE book_id=? AND entity_type=? ORDER BY mention_count DESC',
+                (book_id, entity_type)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                'SELECT * FROM knowledge_nodes WHERE book_id=? ORDER BY mention_count DESC',
+                (book_id,)
+            ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def get_knowledge_node_by_name(self, book_id, entity_name):
+        conn = self._conn()
+        row = conn.execute(
+            'SELECT * FROM knowledge_nodes WHERE book_id=? AND entity_name=?',
+            (book_id, entity_name)
+        ).fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def add_knowledge_edge(self, edge):
+        conn = self._conn()
+        conn.execute(
+            '''INSERT INTO knowledge_edges
+               (id, book_id, source_node_id, target_node_id, relation_type, relation_detail,
+                evidence_text, evidence_node_id, confidence, status, valid_from_chapter, valid_until_chapter, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (edge['id'], edge['book_id'], edge['source_node_id'], edge['target_node_id'],
+             edge['relation_type'], edge.get('relation_detail', ''),
+             edge.get('evidence_text', ''), edge.get('evidence_node_id'),
+             edge.get('confidence', 0.5), edge.get('status', 'auto'),
+             edge.get('valid_from_chapter'), edge.get('valid_until_chapter'),
+             edge.get('created_at', datetime.now().isoformat()))
+        )
+        conn.commit()
+        conn.close()
+
+    def get_knowledge_edges(self, book_id, node_id=None, status=None):
+        conn = self._conn()
+        query = 'SELECT * FROM knowledge_edges WHERE book_id=?'
+        vals = [book_id]
+        if node_id:
+            query += ' AND (source_node_id=? OR target_node_id=?)'
+            vals.extend([node_id, node_id])
+        if status:
+            query += ' AND status=?'
+            vals.append(status)
+        rows = conn.execute(query, tuple(vals)).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def update_knowledge_edge_status(self, edge_id, status):
+        conn = self._conn()
+        conn.execute('UPDATE knowledge_edges SET status=? WHERE id=?', (status, edge_id))
+        conn.commit()
+        conn.close()
+
+    def delete_knowledge_nodes(self, node_ids):
+        conn = self._conn()
+        for nid in node_ids:
+            conn.execute('DELETE FROM knowledge_edges WHERE source_node_id=? OR target_node_id=?', (nid, nid))
+            conn.execute('DELETE FROM knowledge_nodes WHERE id=?', (nid,))
+        conn.commit()
+        conn.close()
+
+    def add_story_event(self, event):
+        conn = self._conn()
+        conn.execute(
+            '''INSERT INTO story_events
+               (id, book_id, node_id, actor_node_id, action, target_node_id, location_node_id,
+                story_time, significance, consequences, participants, evidence_text, chapter_index, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (event['id'], event['book_id'], event.get('node_id'),
+             event.get('actor_node_id'), event['action'],
+             event.get('target_node_id'), event.get('location_node_id'),
+             event.get('story_time', ''), event.get('significance', 3),
+             json.dumps(event.get('consequences', []), ensure_ascii=False),
+             json.dumps(event.get('participants', []), ensure_ascii=False),
+             event.get('evidence_text', ''), event.get('chapter_index', 0),
+             event.get('created_at', datetime.now().isoformat()))
+        )
+        conn.commit()
+        conn.close()
+
+    def get_story_events(self, book_id, node_id=None, actor_node_id=None):
+        conn = self._conn()
+        query = 'SELECT * FROM story_events WHERE book_id=?'
+        vals = [book_id]
+        if node_id:
+            query += ' AND node_id=?'
+            vals.append(node_id)
+        if actor_node_id:
+            query += ' AND actor_node_id=?'
+            vals.append(actor_node_id)
+        query += ' ORDER BY chapter_index'
+        rows = conn.execute(query, tuple(vals)).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    # ============== 伏笔回填 ==============
+
+    def add_foreshadow_payoff_link(self, link):
+        conn = self._conn()
+        conn.execute(
+            '''INSERT INTO foreshadow_payoff_links
+               (id, book_id, foreshadow_id, payoff_node_id, payoff_type, confidence,
+                evidence_text, auto_detected, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (link['id'], link['book_id'], link['foreshadow_id'],
+             link['payoff_node_id'], link['payoff_type'],
+             link.get('confidence', 0.5), link.get('evidence_text', ''),
+             link.get('auto_detected', 1),
+             link.get('created_at', datetime.now().isoformat()))
+        )
+        conn.commit()
+        conn.close()
+
+    def get_foreshadow_payoff_links(self, book_id, foreshadow_id=None):
+        conn = self._conn()
+        if foreshadow_id:
+            rows = conn.execute(
+                'SELECT * FROM foreshadow_payoff_links WHERE book_id=? AND foreshadow_id=? ORDER BY created_at DESC',
+                (book_id, foreshadow_id)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                'SELECT * FROM foreshadow_payoff_links WHERE book_id=? ORDER BY created_at DESC',
+                (book_id,)
+            ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    def delete_foreshadow_payoff_link(self, link_id):
+        conn = self._conn()
+        conn.execute('DELETE FROM foreshadow_payoff_links WHERE id=?', (link_id,))
+        conn.commit()
+        conn.close()
+
+    def update_foreshadowing_payoff(self, foreshadow_id, payoff_type, evidence, resolved_node_id='', resolved_chapter=''):
+        conn = self._conn()
+        conn.execute(
+            '''UPDATE foreshadowing SET status=?, payoff_type=?, payoff_evidence=?,
+               resolved_node_id=?, resolved_chapter=? WHERE id=?''',
+            ('resolved' if payoff_type == 'resolved' else 'partial',
+             payoff_type, evidence, resolved_node_id, resolved_chapter, foreshadow_id)
+        )
+        conn.commit()
+        conn.close()
+
+    def undo_foreshadowing_payoff(self, foreshadow_id):
+        conn = self._conn()
+        conn.execute(
+            "UPDATE foreshadowing SET status='unresolved', payoff_type=NULL, payoff_evidence='', resolved_node_id='', resolved_chapter='' WHERE id=?",
+            (foreshadow_id,)
+        )
+        conn.commit()
+        conn.close()
+
+    # ============== 叙事弧光分析 ==============
+
+    def get_narrative_analysis(self, book_id, node_id=None):
+        conn = self._conn()
+        if node_id:
+            rows = conn.execute(
+                'SELECT * FROM narrative_analysis WHERE book_id=? AND node_id=?',
+                (book_id, node_id)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                'SELECT * FROM narrative_analysis WHERE book_id=? ORDER BY chapter_index',
+                (book_id,)
+            ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]

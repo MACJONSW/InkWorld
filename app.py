@@ -9,7 +9,9 @@ import hashlib
 import sqlite3
 import re
 import math
+import secrets
 import threading
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
@@ -23,16 +25,63 @@ from database import Database
 from agents import AgentOrchestrator
 from memory_engine import MemoryEngine
 from export_engine import ExportEngine
+from rule_engine import RuleEngine
+from timeline_engine import TimelineEngine
+from snapshot_engine import SnapshotEngine
+from search_engine import SearchEngine
+from job_engine import JobEngine
+from workflow_engine import WorkflowEngine
+from consistency_engine import ConsistencyEngine
+from stats_engine import StatsEngine
+from embedding_engine import EmbeddingEngine
+from ner_engine import NEREngine
+from disambiguation_engine import DisambiguationEngine
+from knowledge_graph_engine import KnowledgeGraphEngine
+from foreshadow_engine import ForeshadowEngine
+from narrative_engine import NarrativeEngine
+
+
+def _get_jwt_secret():
+    """从环境变量或本地文件加载 JWT 密钥，不使用硬编码默认值"""
+    env_key = os.environ.get('APP_SECRET_KEY')
+    if env_key and len(env_key) >= 32:
+        return env_key
+    secret_path = os.path.join(os.path.dirname(__file__), '.jwt_secret')
+    if os.path.exists(secret_path):
+        with open(secret_path, 'r') as f:
+            return f.read().strip()
+    new_secret = secrets.token_hex(32)
+    fd = os.open(secret_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w') as f:
+        f.write(new_secret)
+    return new_secret
+
 
 app = Flask(__name__, static_folder='static', template_folder='templates')
-app.config['SECRET_KEY'] = os.environ.get('APP_SECRET_KEY', 'dev-secret-change-me')
-CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+app.config['SECRET_KEY'] = _get_jwt_secret()
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB
+ALLOWED_ORIGINS = os.environ.get('ALLOWED_ORIGINS', 'http://localhost:5000').split(',')
+CORS(app, origins=ALLOWED_ORIGINS, supports_credentials=True)
+socketio = SocketIO(app, cors_allowed_origins=ALLOWED_ORIGINS, async_mode='threading')
 
 db = Database()
 agent_orchestrator = AgentOrchestrator(db)
 memory_engine = MemoryEngine(db)
 export_engine = ExportEngine(db)
+rule_engine = RuleEngine(db)
+timeline_engine = TimelineEngine(db)
+snapshot_engine = SnapshotEngine(db)
+search_engine = SearchEngine(db)
+job_engine = JobEngine(db)
+workflow_engine = WorkflowEngine(db)
+consistency_engine = ConsistencyEngine(db)
+stats_engine = StatsEngine(db)
+embedding_engine = EmbeddingEngine(db)
+ner_engine = NEREngine(db)
+disambiguation_engine = DisambiguationEngine(db)
+knowledge_graph_engine = KnowledgeGraphEngine(db)
+foreshadow_engine = ForeshadowEngine(db)
+narrative_engine = NarrativeEngine(db)
 db.init_db()
 
 # P0: 注入摘要回调，让 MemoryEngine 在无摘要时自动触发 LLM 摘要
@@ -46,6 +95,54 @@ def _summarizer_callback(book_id, node_id, chapter_title, text):
     return result.get('summary', '')
 
 memory_engine.set_summarizer_callback(_summarizer_callback)
+memory_engine.set_embedding_engine(embedding_engine)
+memory_engine.set_disambiguation_engine(disambiguation_engine)
+agent_orchestrator.set_rule_engine(rule_engine)
+agent_orchestrator.set_stats_engine(stats_engine)
+
+# NER LLM 回调注入
+def _ner_extractor_callback(text, known_entities):
+    result = agent_orchestrator.run_ner_extract({'text': text, 'known_entities': known_entities})
+    return result.get('entities', result) if isinstance(result, dict) else result
+
+ner_engine.set_llm_extractor(_ner_extractor_callback)
+
+# 消歧 LLM 回调注入
+def _coreference_resolver_callback(mentions, context, candidates):
+    return agent_orchestrator.run_coreference_resolve({
+        'mentions': mentions, 'context': context, 'candidates': candidates
+    })
+
+disambiguation_engine.set_llm_resolver(_coreference_resolver_callback)
+
+# 知识图谱回调注入
+def _relation_extractor_callback(text, known_entities):
+    result = agent_orchestrator.run_relation_extract({'text': text, 'known_entities': known_entities})
+    return result.get('relations', result) if isinstance(result, dict) else result
+
+def _event_extractor_callback(text, known_entities):
+    result = agent_orchestrator.run_event_extract({'text': text, 'known_entities': known_entities})
+    return result.get('events', result) if isinstance(result, dict) else result
+
+knowledge_graph_engine.set_relation_extractor(_relation_extractor_callback)
+knowledge_graph_engine.set_event_extractor(_event_extractor_callback)
+
+# 伏笔回填回调注入
+def _payoff_judge_callback(chapter_text, foreshadow_item):
+    return agent_orchestrator.run_payoff_judge({
+        'chapter_text': chapter_text, 'foreshadow': foreshadow_item
+    })
+
+foreshadow_engine.set_embedding_engine(embedding_engine)
+foreshadow_engine.set_llm_judge(_payoff_judge_callback)
+
+# 叙事分析回调注入
+def _narrative_analyzer_callback(summary_text, chapter_title):
+    return agent_orchestrator.run_narrative_analysis({
+        'summary': summary_text, 'chapter_title': chapter_title
+    })
+
+narrative_engine.set_llm_analyzer(_narrative_analyzer_callback)
 
 JWT_ALGORITHM = 'HS256'
 JWT_EXPIRE_DAYS = 30
@@ -122,6 +219,63 @@ def _json_body():
     return request.get_json(silent=True) or {}
 
 
+# ---- 安全响应头 ----
+@app.after_request
+def set_security_headers(response):
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'SAMEORIGIN'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    return response
+
+
+# ---- IDOR 权限检查辅助 ----
+def _require_resource_owner(table, id_value, id_col='id', book_col='book_id'):
+    """通用资源权限检查：resource → book_id → user_id"""
+    conn = db._conn()
+    row = conn.execute(f'SELECT {book_col} FROM {table} WHERE {id_col}=?', (id_value,)).fetchone()
+    conn.close()
+    if not row:
+        abort(404)
+    book_id = row[book_col]
+    _require_book_access(book_id)
+    return book_id
+
+
+def _require_job_owner(job_id):
+    """检查 Job 归属"""
+    conn = db._conn()
+    row = conn.execute('SELECT user_id FROM async_jobs WHERE id=?', (job_id,)).fetchone()
+    conn.close()
+    if not row or row['user_id'] != g.user_id:
+        abort(403)
+
+
+# ---- SSRF 校验 ----
+def _validate_base_url(url):
+    """校验 base_url 不指向内网地址"""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ('http', 'https'):
+        return False, '仅支持 http/https 协议'
+    host = (parsed.hostname or '').lower()
+    blocked = ['localhost', '127.0.0.1', '0.0.0.0', '169.254.169.254', '[::1]', '::1']
+    if host in blocked:
+        return False, '不允许指向本地地址'
+    # 拒绝常见内网网段
+    if host.startswith('10.') or host.startswith('192.168.'):
+        return False, '不允许指向内网地址'
+    if host.startswith('172.'):
+        parts = host.split('.')
+        if len(parts) >= 2:
+            try:
+                second = int(parts[1])
+                if 16 <= second <= 31:
+                    return False, '不允许指向内网地址'
+            except ValueError:
+                pass
+    return True, ''
+
+
 def _prepare_agent_data():
     data = _json_body()
     book_id = data.get('book_id')
@@ -192,12 +346,22 @@ def get_models():
 @app.route('/api/models', methods=['POST'])
 def add_model():
     data = _json_body()
+    base_url = data.get('base_url', '')
+    if base_url:
+        valid, err = _validate_base_url(base_url)
+        if not valid:
+            return jsonify({'error': err}), 400
     model_id = db.add_model(data, g.user_id)
     return jsonify({'id': model_id, 'status': 'ok'})
 
 @app.route('/api/models/<model_id>', methods=['PUT'])
 def update_model(model_id):
     data = _json_body()
+    base_url = data.get('base_url', '')
+    if base_url:
+        valid, err = _validate_base_url(base_url)
+        if not valid:
+            return jsonify({'error': err}), 400
     db.update_model(model_id, data, g.user_id)
     return jsonify({'status': 'ok'})
 
@@ -408,7 +572,7 @@ def vector_retrieve():
     if book_id:
         _require_book_access(book_id)
     query = data.get('query', '')
-    top_k = data.get('top_k', 5)
+    top_k = min(int(data.get('top_k', 5)), 50)
     results = memory_engine.vector_retrieve(book_id, query, top_k)
     return jsonify({'results': results})
 
@@ -785,6 +949,18 @@ def export_book(book_id, fmt):
                        headers={'Content-Disposition': f'attachment; filename={filename}'})
     return jsonify({'error': 'unknown format'}), 400
 
+@app.route('/api/export/<book_id>/scoped', methods=['GET'])
+def export_scoped(book_id):
+    _require_book_access(book_id)
+    scope = request.args.get('scope', 'book')
+    node_id = request.args.get('node_id')
+    include = request.args.getlist('include') or None
+    content, filename = export_engine.to_markdown_scoped(
+        book_id, scope=scope, node_id=node_id, include=include, user_id=g.user_id
+    )
+    return Response(content, mimetype='text/markdown',
+                   headers={'Content-Disposition': f'attachment; filename={filename}'})
+
 @app.route('/api/import', methods=['POST'])
 def import_workspace():
     if 'file' in request.files:
@@ -972,12 +1148,872 @@ def diagnostics_tension(book_id):
     _require_book_access(book_id)
     return jsonify(_build_tension_diagnostics(book_id))
 
+# ===================== 写作规则中心 API =====================
+
+@app.route('/api/rules/<book_id>/sets', methods=['GET'])
+def get_rule_sets(book_id):
+    _require_book_access(book_id)
+    return jsonify(db.get_writing_rule_sets(book_id))
+
+@app.route('/api/rules/<book_id>/sets', methods=['POST'])
+def create_rule_set(book_id):
+    _require_book_access(book_id)
+    data = _json_body()
+    data['book_id'] = book_id
+    sid = db.create_writing_rule_set(data)
+    return jsonify({'id': sid, 'status': 'ok'})
+
+@app.route('/api/rules/<book_id>/sets/<set_id>', methods=['PUT'])
+def update_rule_set(book_id, set_id):
+    _require_book_access(book_id)
+    db.update_writing_rule_set(set_id, _json_body())
+    return jsonify({'status': 'ok'})
+
+@app.route('/api/rules/<book_id>/sets/<set_id>', methods=['DELETE'])
+def delete_rule_set(book_id, set_id):
+    _require_book_access(book_id)
+    db.delete_writing_rule_set(set_id)
+    return jsonify({'status': 'ok'})
+
+@app.route('/api/rules/<book_id>/rules', methods=['GET'])
+def get_rules(book_id):
+    _require_book_access(book_id)
+    rule_set_id = request.args.get('rule_set_id')
+    category = request.args.get('category')
+    return jsonify(db.get_writing_rules(book_id, rule_set_id=rule_set_id, category=category))
+
+@app.route('/api/rules/<book_id>/rules', methods=['POST'])
+def add_rule(book_id):
+    _require_book_access(book_id)
+    data = _json_body()
+    data['book_id'] = book_id
+    rid = db.add_writing_rule(data)
+    return jsonify({'id': rid, 'status': 'ok'})
+
+@app.route('/api/rules/<book_id>/rules/<rule_id>', methods=['PUT'])
+def update_rule(book_id, rule_id):
+    _require_book_access(book_id)
+    db.update_writing_rule(rule_id, _json_body())
+    return jsonify({'status': 'ok'})
+
+@app.route('/api/rules/<book_id>/rules/<rule_id>', methods=['DELETE'])
+def delete_rule(book_id, rule_id):
+    _require_book_access(book_id)
+    db.delete_writing_rule(rule_id)
+    return jsonify({'status': 'ok'})
+
+@app.route('/api/rules/<book_id>/active', methods=['GET'])
+def get_active_rules(book_id):
+    _require_book_access(book_id)
+    node_id = request.args.get('node_id')
+    rules = rule_engine.get_active_rules(book_id, node_id)
+    return jsonify(rules)
+
+@app.route('/api/rules/<book_id>/validate', methods=['POST'])
+def validate_rules(book_id):
+    _require_book_access(book_id)
+    data = _json_body()
+    violations = rule_engine.validate_against_rules(book_id, data.get('text', ''), data.get('node_id'))
+    return jsonify({'violations': violations})
+
+@app.route('/api/rules/<book_id>/conflicts', methods=['GET'])
+def check_rule_conflicts(book_id):
+    _require_book_access(book_id)
+    return jsonify({'conflicts': rule_engine.check_rule_conflicts(book_id)})
+
+# ===================== 时间线与事件账本 API =====================
+
+@app.route('/api/timeline/<book_id>', methods=['GET'])
+def get_timeline(book_id):
+    _require_book_access(book_id)
+    entity = request.args.get('entity')
+    node_id = request.args.get('node_id')
+    event_type = request.args.get('type')
+    events = db.get_timeline_events(book_id, entity_name=entity, node_id=node_id, event_type=event_type)
+    return jsonify(events)
+
+@app.route('/api/timeline/<book_id>/events', methods=['POST'])
+def add_timeline_event(book_id):
+    _require_book_access(book_id)
+    data = _json_body()
+    data['book_id'] = book_id
+    data['source'] = 'manual'
+    eid = db.add_timeline_event(data)
+    return jsonify({'id': eid, 'status': 'ok'})
+
+@app.route('/api/timeline/<book_id>/events/<event_id>', methods=['PUT'])
+def update_timeline_event(book_id, event_id):
+    _require_book_access(book_id)
+    db.update_timeline_event(event_id, _json_body())
+    return jsonify({'status': 'ok'})
+
+@app.route('/api/timeline/<book_id>/events/<event_id>', methods=['DELETE'])
+def delete_timeline_event(book_id, event_id):
+    _require_book_access(book_id)
+    db.delete_timeline_event(event_id)
+    return jsonify({'status': 'ok'})
+
+@app.route('/api/timeline/<book_id>/extract', methods=['POST'])
+def extract_timeline_events(book_id):
+    _require_book_access(book_id)
+    data = _json_body()
+    node_id = data.get('node_id')
+    text = data.get('text', '')
+    if node_id and not text:
+        content = db.get_node_content(node_id)
+        text = content.get('content', '')
+    events = timeline_engine.extract_events_from_text(book_id, node_id, text,
+                                                       chapter_index=data.get('chapter_index', 0))
+    return jsonify({'created': len(events), 'event_ids': events})
+
+@app.route('/api/timeline/<book_id>/detect-conflicts', methods=['POST'])
+def detect_timeline_conflicts(book_id):
+    _require_book_access(book_id)
+    conflicts = timeline_engine.detect_conflicts(book_id)
+    return jsonify({'conflicts': conflicts})
+
+@app.route('/api/timeline/<book_id>/transitions', methods=['GET'])
+def get_transitions(book_id):
+    _require_book_access(book_id)
+    entity = request.args.get('entity')
+    return jsonify(db.get_entity_state_transitions(book_id, entity_name=entity))
+
+# ===================== 快照与回收站 API =====================
+
+@app.route('/api/snapshots/<book_id>', methods=['GET'])
+def get_snapshots(book_id):
+    _require_book_access(book_id)
+    node_id = request.args.get('node_id')
+    return jsonify(db.get_snapshots(book_id, node_id=node_id))
+
+@app.route('/api/snapshots/<book_id>', methods=['POST'])
+def create_snapshot(book_id):
+    _require_book_access(book_id)
+    data = _json_body()
+    node_id = data.get('node_id')
+    if node_id:
+        sid = snapshot_engine.create_node_snapshot(book_id, node_id,
+                                                   snapshot_type=data.get('snapshot_type', 'manual'),
+                                                   label=data.get('label', ''))
+    else:
+        sid = snapshot_engine.create_book_snapshot(book_id,
+                                                   snapshot_type=data.get('snapshot_type', 'manual'),
+                                                   label=data.get('label', ''))
+    return jsonify({'id': sid, 'status': 'ok'})
+
+@app.route('/api/snapshots/<snapshot_id>/preview', methods=['GET'])
+def preview_snapshot(snapshot_id):
+    _require_resource_owner('snapshots', snapshot_id)
+    preview = snapshot_engine.preview_restore(snapshot_id)
+    if not preview:
+        return jsonify({'error': 'not_found'}), 404
+    return jsonify(preview)
+
+@app.route('/api/snapshots/<snapshot_id>/restore', methods=['POST'])
+def restore_snapshot(snapshot_id):
+    _require_resource_owner('snapshots', snapshot_id)
+    ok = snapshot_engine.restore_node_snapshot(snapshot_id)
+    if not ok:
+        return jsonify({'error': 'restore_failed'}), 400
+    return jsonify({'status': 'ok'})
+
+@app.route('/api/recycle-bin/<book_id>', methods=['GET'])
+def get_recycle_bin(book_id):
+    _require_book_access(book_id)
+    return jsonify(db.get_recycle_bin(book_id))
+
+@app.route('/api/recycle-bin/<recycle_id>/restore', methods=['POST'])
+def restore_from_recycle(recycle_id):
+    _require_resource_owner('recycle_bin', recycle_id)
+    ok = snapshot_engine.restore_from_recycle(recycle_id)
+    if not ok:
+        return jsonify({'error': 'restore_failed'}), 400
+    return jsonify({'status': 'ok'})
+
+@app.route('/api/recycle-bin/<recycle_id>', methods=['DELETE'])
+def delete_from_recycle(recycle_id):
+    _require_resource_owner('recycle_bin', recycle_id)
+    db.delete_recycle_bin_item(recycle_id)
+    return jsonify({'status': 'ok'})
+
+# ===================== 全局搜索与引用追踪 API =====================
+
+@app.route('/api/search/<book_id>', methods=['POST'])
+def global_search(book_id):
+    _require_book_access(book_id)
+    data = _json_body()
+    results = search_engine.search(book_id, data.get('query', ''),
+                                    scope=data.get('scope'),
+                                    entity_type=data.get('entity_type'))
+    return jsonify(results)
+
+@app.route('/api/search/<book_id>/replace', methods=['POST'])
+def global_replace(book_id):
+    _require_book_access(book_id)
+    data = _json_body()
+    preview_only = data.get('preview_only', True)
+    if not preview_only:
+        snapshot_engine.create_book_snapshot(book_id, snapshot_type='auto_replace', label='替换前快照')
+    result = search_engine.replace_all(book_id, data.get('search_text', ''),
+                                        data.get('replace_text', ''),
+                                        preview_only=preview_only)
+    return jsonify(result)
+
+@app.route('/api/search/<book_id>/references', methods=['GET'])
+def find_references(book_id):
+    _require_book_access(book_id)
+    entity = request.args.get('entity', '')
+    return jsonify(search_engine.find_references(book_id, entity))
+
+@app.route('/api/search/<book_id>/chapter-refs/<node_id>', methods=['GET'])
+def find_chapter_refs(book_id, node_id):
+    _require_book_access(book_id)
+    return jsonify(search_engine.find_chapter_references(book_id, node_id))
+
+# ===================== 异步任务中心 API =====================
+
+@app.route('/api/jobs', methods=['GET'])
+def get_jobs():
+    status = request.args.get('status')
+    return jsonify(db.get_async_jobs(g.user_id, status=status))
+
+@app.route('/api/jobs/<job_id>', methods=['GET'])
+def get_job_detail(job_id):
+    _require_job_owner(job_id)
+    job = db.get_async_job(job_id)
+    if not job:
+        return jsonify({'error': 'not_found'}), 404
+    logs = db.get_job_logs(job_id, limit=50)
+    return jsonify({'job': job, 'logs': logs})
+
+@app.route('/api/jobs/<job_id>/cancel', methods=['POST'])
+def cancel_job(job_id):
+    _require_job_owner(job_id)
+    ok = job_engine.cancel_job(job_id)
+    return jsonify({'status': 'ok' if ok else 'not_running'})
+
+@app.route('/api/jobs/<job_id>/retry', methods=['POST'])
+def retry_job(job_id):
+    _require_job_owner(job_id)
+    new_id = job_engine.retry_job(job_id)
+    if not new_id:
+        return jsonify({'error': 'cannot_retry'}), 400
+    return jsonify({'id': new_id, 'status': 'ok'})
+
+# ===================== 记忆注入日志 API =====================
+
+@app.route('/api/memory/injection-log/<book_id>', methods=['GET'])
+def get_injection_logs(book_id):
+    _require_book_access(book_id)
+    node_id = request.args.get('node_id')
+    logs = db.get_memory_injection_logs(book_id, node_id=node_id)
+    return jsonify(logs)
+
+@app.route('/api/memory/pin/<book_id>', methods=['GET'])
+def get_pinned_memories(book_id):
+    _require_book_access(book_id)
+    return jsonify(db.get_pinned_memories(book_id))
+
+@app.route('/api/memory/pin/<book_id>', methods=['POST'])
+def pin_memory(book_id):
+    _require_book_access(book_id)
+    data = _json_body()
+    data['book_id'] = book_id
+    pid = db.add_pinned_memory(data)
+    return jsonify({'id': pid, 'status': 'ok'})
+
+@app.route('/api/memory/pin/<book_id>/<pin_id>', methods=['DELETE'])
+def unpin_memory(book_id, pin_id):
+    _require_book_access(book_id)
+    db.delete_pinned_memory(pin_id)
+    return jsonify({'status': 'ok'})
+
+# ===================== 一致性报告 API =====================
+
+@app.route('/api/consistency/<book_id>/scan', methods=['POST'])
+def consistency_scan(book_id):
+    _require_book_access(book_id)
+    report_id = db.create_consistency_report({'book_id': book_id})
+    job_id = job_engine.create_and_start(g.user_id, 'consistency_scan', book_id=book_id)
+    def _run_scan(jid, job_data, progress_cb, cancel_ev):
+        progress_cb(1, 4, '检查伏笔...')
+        consistency_engine.run_full_scan(book_id, report_id=report_id)
+        return f'报告 {report_id} 完成'
+    job_engine.register_handler('consistency_scan', _run_scan)
+    job_engine.start_job(job_id)
+    return jsonify({'report_id': report_id, 'job_id': job_id, 'status': 'ok'})
+
+@app.route('/api/consistency/<book_id>/reports', methods=['GET'])
+def get_consistency_reports(book_id):
+    _require_book_access(book_id)
+    return jsonify(db.get_consistency_reports(book_id))
+
+@app.route('/api/consistency/<book_id>/reports/<report_id>', methods=['GET'])
+def get_consistency_report(book_id, report_id):
+    _require_book_access(book_id)
+    report = db.get_consistency_report(report_id)
+    if not report:
+        return jsonify({'error': 'not_found'}), 404
+    issues = db.get_consistency_issues(report_id=report_id)
+    return jsonify({'report': report, 'issues': issues})
+
+@app.route('/api/consistency/issues/<issue_id>', methods=['PUT'])
+def update_issue(issue_id):
+    _require_resource_owner('consistency_issues', issue_id)
+    data = _json_body()
+    db.update_consistency_issue(issue_id, data)
+    return jsonify({'status': 'ok'})
+
+# ===================== 章节工作流 API =====================
+
+@app.route('/api/workflow/templates', methods=['GET'])
+def get_workflow_templates():
+    book_id = request.args.get('book_id')
+    templates = db.get_workflow_templates(user_id=g.user_id, book_id=book_id)
+    default = workflow_engine.get_default_template()
+    default['id'] = 'default'
+    return jsonify([default] + templates)
+
+@app.route('/api/workflow/templates', methods=['POST'])
+def create_workflow_template():
+    data = _json_body()
+    data['user_id'] = g.user_id
+    tid = db.create_workflow_template(data)
+    return jsonify({'id': tid, 'status': 'ok'})
+
+@app.route('/api/workflow/run', methods=['POST'])
+def start_workflow():
+    data = _json_body()
+    book_id = data.get('book_id')
+    node_id = data.get('node_id')
+    if book_id:
+        _require_book_access(book_id)
+    if node_id:
+        _require_node_access(node_id)
+    run_id = workflow_engine.create_run(book_id, node_id,
+                                         goals=data.get('goals', ''),
+                                         template_id=data.get('template_id'),
+                                         user_id=g.user_id)
+    return jsonify({'id': run_id, 'status': 'ok'})
+
+@app.route('/api/workflow/run/<run_id>', methods=['GET'])
+def get_workflow_status(run_id):
+    status = workflow_engine.get_run_status(run_id)
+    if not status:
+        return jsonify({'error': 'not_found'}), 404
+    return jsonify(status)
+
+@app.route('/api/workflow/run/<run_id>/step/<int:step_idx>', methods=['POST'])
+def execute_workflow_step(run_id, step_idx):
+    data = _json_body()
+    data['user_id'] = g.user_id
+    agent_orchestrator.set_request_user(g.user_id)
+    result = workflow_engine.execute_step(run_id, step_idx, user_data=data)
+    return jsonify(result)
+
+@app.route('/api/workflow/run/<run_id>/confirm/<int:step_idx>', methods=['POST'])
+def confirm_workflow_step(run_id, step_idx):
+    workflow_engine.confirm_step(run_id, step_idx)
+    return jsonify({'status': 'ok'})
+
+# ===================== 增强统计 API =====================
+
+@app.route('/api/stats/enhanced', methods=['GET'])
+def get_enhanced_stats():
+    book_id = request.args.get('book_id')
+    return jsonify(stats_engine.get_dashboard(g.user_id, book_id=book_id))
+
+@app.route('/api/stats/adopted', methods=['POST'])
+def mark_adopted():
+    data = _json_body()
+    stats_engine.mark_adopted(g.user_id, data.get('agent_role', ''), book_id=data.get('book_id'))
+    return jsonify({'status': 'ok'})
+
+# ===================== 世界状态增强 API =====================
+
+@app.route('/api/world-state/<book_id>/history', methods=['GET'])
+def get_world_state_history(book_id):
+    _require_book_access(book_id)
+    entity = request.args.get('entity')
+    return jsonify(db.get_world_state_history(book_id, entity_name=entity))
+
+@app.route('/api/world-state/<book_id>/current', methods=['GET'])
+def get_current_world_state(book_id):
+    _require_book_access(book_id)
+    entity = request.args.get('entity')
+    return jsonify(db.get_current_world_state(book_id, entity_name=entity))
+
+@app.route('/api/world-state/<book_id>/v2', methods=['POST'])
+def upsert_world_state_v2(book_id):
+    _require_book_access(book_id)
+    data = _json_body()
+    data['book_id'] = book_id
+    ws_id = db.upsert_world_state_v2(data)
+    return jsonify({'id': ws_id, 'status': 'ok'})
+
+# ===================== 版本分支增强 API =====================
+
+@app.route('/api/nodes/<node_id>/versions/v2', methods=['POST'])
+def create_version_v2(node_id):
+    _require_node_access(node_id)
+    data = _json_body()
+    data['node_id'] = node_id
+    vid = db.create_version_v2(data)
+    return jsonify({'id': vid, 'status': 'ok'})
+
+@app.route('/api/versions/<ver_id>', methods=['PUT'])
+def update_version(ver_id):
+    # versions 通过 node_id 关联到 book -> user
+    conn = db._conn()
+    row = conn.execute('SELECT node_id FROM versions WHERE id=?', (ver_id,)).fetchone()
+    conn.close()
+    if not row:
+        abort(404)
+    _require_node_access(row['node_id'])
+    data = _json_body()
+    db.update_version(ver_id, data)
+    return jsonify({'status': 'ok'})
+
+# ===================== 导入导出增强 API =====================
+
+@app.route('/api/import/preview', methods=['POST'])
+def import_preview():
+    if 'file' not in request.files:
+        return jsonify({'error': 'no_file'}), 400
+    f = request.files['file']
+    filename = f.filename.lower()
+
+    chapters = []
+    if filename.endswith('.md'):
+        content = f.read().decode('utf-8', errors='replace')
+        chapters = export_engine.import_markdown(content)
+    elif filename.endswith('.txt'):
+        content = f.read().decode('utf-8', errors='replace')
+        chapters = export_engine.import_txt(content)
+    elif filename.endswith('.docx'):
+        raw = f.read()
+        chapters = export_engine.import_docx(raw)
+    else:
+        return jsonify({'error': 'unsupported_format'}), 400
+
+    total_chars = sum(len(c.get('content', '')) for c in chapters)
+    return jsonify({
+        'filename': f.filename,
+        'total_chars': total_chars,
+        'chapters': [{'title': c['title'], 'content_preview': c['content'][:200]}
+                      for c in chapters]
+    })
+
+@app.route('/api/import/file', methods=['POST'])
+def import_file():
+    if 'file' not in request.files:
+        return jsonify({'error': 'no_file'}), 400
+    f = request.files['file']
+    filename = f.filename.lower()
+    book_title = request.form.get('title') or f.filename.rsplit('.', 1)[0]
+
+    chapters = []
+    if filename.endswith('.md'):
+        content = f.read().decode('utf-8', errors='replace')
+        chapters = export_engine.import_markdown(content)
+    elif filename.endswith('.txt'):
+        content = f.read().decode('utf-8', errors='replace')
+        chapters = export_engine.import_txt(content)
+    elif filename.endswith('.docx'):
+        raw = f.read()
+        chapters = export_engine.import_docx(raw)
+    else:
+        return jsonify({'error': 'unsupported_format'}), 400
+
+    book_id = db.create_book({'title': book_title}, g.user_id)
+    for ch in chapters:
+        node_id = db.create_node({
+            'book_id': book_id,
+            'type': ch.get('type', 'chapter'),
+            'title': ch['title'],
+            'parent_id': ch.get('parent_id')
+        })
+        db.save_node_content(node_id, {'content': ch['content']})
+
+    return jsonify({'book_id': book_id, 'chapters_imported': len(chapters), 'status': 'ok'})
+
+
+def _parse_markdown_chapters(content):
+    """按 Markdown 标题拆分章节"""
+    lines = content.split('\n')
+    chapters = []
+    current_title = '未命名章节'
+    current_content = []
+
+    for line in lines:
+        if line.startswith('#'):
+            if current_content:
+                chapters.append({'title': current_title, 'content': '\n'.join(current_content).strip()})
+                current_content = []
+            current_title = line.lstrip('#').strip()
+        else:
+            current_content.append(line)
+
+    if current_content:
+        chapters.append({'title': current_title, 'content': '\n'.join(current_content).strip()})
+
+    return [c for c in chapters if c['content']]
+
+
+def _parse_txt_chapters(content):
+    """按"第X章"模式或空行分隔拆分章节"""
+    import re
+    pattern = re.compile(r'^(第[一二三四五六七八九十百千\d]+[章节回].*?)$', re.MULTILINE)
+    splits = pattern.split(content)
+
+    chapters = []
+    if len(splits) <= 1:
+        # 无章节标题，按段落分
+        paragraphs = content.split('\n\n')
+        if len(paragraphs) <= 1:
+            return [{'title': '全文', 'content': content.strip()}]
+        chunk_size = max(1, len(paragraphs) // 10)
+        for i in range(0, len(paragraphs), chunk_size):
+            chunk = '\n\n'.join(paragraphs[i:i+chunk_size]).strip()
+            if chunk:
+                chapters.append({'title': f'段落 {i//chunk_size + 1}', 'content': chunk})
+        return chapters
+
+    # splits[0] 是第一个标题前的内容
+    if splits[0].strip():
+        chapters.append({'title': '前言', 'content': splits[0].strip()})
+    for i in range(1, len(splits), 2):
+        title = splits[i].strip()
+        body = splits[i+1].strip() if i+1 < len(splits) else ''
+        if title or body:
+            chapters.append({'title': title, 'content': body})
+
+    return chapters
+
+# ===================== Embedding API =====================
+
+@app.route('/api/embedding/<book_id>/build', methods=['POST'])
+def embedding_build(book_id):
+    _require_book_access(book_id)
+    result = embedding_engine.build_index(book_id, g.user_id)
+    return jsonify(result)
+
+@app.route('/api/embedding/<book_id>/status', methods=['GET'])
+def embedding_status(book_id):
+    _require_book_access(book_id)
+    meta = db.get_index_meta(book_id)
+    return jsonify({'has_index': meta is not None, 'meta': meta})
+
+@app.route('/api/embedding/<book_id>/rebuild', methods=['POST'])
+def embedding_rebuild(book_id):
+    _require_book_access(book_id)
+    db.delete_embedding_chunks_by_source(book_id)
+    result = embedding_engine.build_index(book_id, g.user_id)
+    return jsonify(result)
+
+@app.route('/api/embedding/retrieve', methods=['POST'])
+def embedding_retrieve():
+    data = _json_body()
+    book_id = data.get('book_id', '')
+    _require_book_access(book_id)
+    query = data.get('query', '')
+    top_k = min(int(data.get('top_k', 5)), 50)
+    results = embedding_engine.retrieve(book_id, g.user_id, query, top_k)
+    return jsonify({'results': results})
+
+# ===================== NER API =====================
+
+@app.route('/api/ner/<book_id>/extract', methods=['POST'])
+def ner_extract(book_id):
+    _require_book_access(book_id)
+    data = _json_body()
+    node_id = data.get('node_id', '')
+    text = data.get('text', '')
+    if not text and node_id:
+        conn = db._conn()
+        row = conn.execute('SELECT content FROM node_contents WHERE node_id=?', (node_id,)).fetchone()
+        conn.close()
+        if row:
+            from database import decrypt
+            text = decrypt(row['content'] or '')
+    results = ner_engine.extract_entities(book_id, node_id, text)
+    return jsonify({'entities': results})
+
+@app.route('/api/ner/<book_id>/extract-all', methods=['POST'])
+def ner_extract_all(book_id):
+    _require_book_access(book_id)
+    conn = db._conn()
+    chapters = conn.execute(
+        "SELECT id FROM nodes WHERE book_id=? AND type='chapter' ORDER BY sort_order",
+        (book_id,)
+    ).fetchall()
+    conn.close()
+    node_ids = [ch['id'] for ch in chapters]
+    results = ner_engine.extract_entities_batch(book_id, node_ids)
+    return jsonify({'total': len(results), 'entities': results[:100]})
+
+@app.route('/api/ner/<book_id>/entities', methods=['GET'])
+def ner_entities(book_id):
+    _require_book_access(book_id)
+    node_id = request.args.get('node_id')
+    entity_type = request.args.get('type')
+    status = request.args.get('status')
+    entities = db.get_extracted_entities(book_id, node_id=node_id, entity_type=entity_type, status=status)
+    return jsonify(entities)
+
+@app.route('/api/ner/<book_id>/unlinked', methods=['GET'])
+def ner_unlinked(book_id):
+    _require_book_access(book_id)
+    return jsonify(db.get_unlinked_entities(book_id))
+
+@app.route('/api/ner/<book_id>/entities/<entity_id>/link', methods=['POST'])
+def ner_link(book_id, entity_id):
+    _require_book_access(book_id)
+    data = _json_body()
+    lorebook_id = data.get('lorebook_id', '')
+    db.link_entity_to_lorebook(entity_id, lorebook_id)
+    return jsonify({'status': 'linked'})
+
+@app.route('/api/ner/<book_id>/entities/<entity_id>/confirm', methods=['POST'])
+def ner_confirm(book_id, entity_id):
+    _require_book_access(book_id)
+    db.update_entity_status(entity_id, 'confirmed')
+    return jsonify({'status': 'confirmed'})
+
+@app.route('/api/ner/<book_id>/entities/<entity_id>/dismiss', methods=['POST'])
+def ner_dismiss(book_id, entity_id):
+    _require_book_access(book_id)
+    db.update_entity_status(entity_id, 'dismissed')
+    return jsonify({'status': 'dismissed'})
+
+# ===================== Disambiguation API =====================
+
+@app.route('/api/disambiguation/<book_id>/resolve', methods=['POST'])
+def disambiguation_resolve(book_id):
+    _require_book_access(book_id)
+    data = _json_body()
+    node_id = data.get('node_id', '')
+    entities = data.get('entities', [])
+    if not entities:
+        entities = db.get_extracted_entities(book_id, node_id=node_id)
+    results = disambiguation_engine.resolve_mentions(book_id, node_id, entities)
+    return jsonify({'results': results})
+
+@app.route('/api/disambiguation/<book_id>/stats', methods=['GET'])
+def disambiguation_stats(book_id):
+    _require_book_access(book_id)
+    return jsonify(disambiguation_engine.get_disambiguation_stats(book_id))
+
+@app.route('/api/disambiguation/<book_id>/feedback', methods=['POST'])
+def disambiguation_feedback_add(book_id):
+    _require_book_access(book_id)
+    data = _json_body()
+    result = disambiguation_engine.add_user_feedback(
+        book_id, data.get('mention_text', ''),
+        data.get('character_id', ''),
+        data.get('scope', 'book'),
+        data.get('scope_node_id')
+    )
+    return jsonify(result)
+
+@app.route('/api/disambiguation/<book_id>/feedback', methods=['GET'])
+def disambiguation_feedback_list(book_id):
+    _require_book_access(book_id)
+    return jsonify(disambiguation_engine.get_feedbacks(book_id))
+
+@app.route('/api/disambiguation/<book_id>/feedback/<feedback_id>', methods=['DELETE'])
+def disambiguation_feedback_delete(book_id, feedback_id):
+    _require_book_access(book_id)
+    disambiguation_engine.delete_feedback(feedback_id)
+    return jsonify({'status': 'deleted'})
+
+# ===================== Knowledge Graph API =====================
+
+@app.route('/api/knowledge/<book_id>/extract', methods=['POST'])
+def knowledge_extract(book_id):
+    _require_book_access(book_id)
+    data = _json_body()
+    node_id = data.get('node_id', '')
+    text = data.get('text', '')
+    if not text and node_id:
+        conn = db._conn()
+        row = conn.execute('SELECT content FROM node_contents WHERE node_id=?', (node_id,)).fetchone()
+        conn.close()
+        if row:
+            from database import decrypt
+            text = decrypt(row['content'] or '')
+    result = knowledge_graph_engine.extract_from_chapter(book_id, node_id, text)
+    return jsonify(result)
+
+@app.route('/api/knowledge/<book_id>/extract-all', methods=['POST'])
+def knowledge_extract_all(book_id):
+    _require_book_access(book_id)
+    conn = db._conn()
+    chapters = conn.execute(
+        "SELECT n.id, n.title, nc.content FROM nodes n LEFT JOIN node_contents nc ON n.id=nc.node_id WHERE n.book_id=? AND n.type='chapter' ORDER BY n.sort_order",
+        (book_id,)
+    ).fetchall()
+    conn.close()
+    from database import decrypt
+    total_new = {'relations': 0, 'events': 0}
+    for ch in chapters:
+        text = decrypt(ch['content'] or '') if ch['content'] else ''
+        if text:
+            r = knowledge_graph_engine.extract_from_chapter(book_id, ch['id'], text)
+            total_new['relations'] += len(r.get('new_edges', []))
+            total_new['events'] += len(r.get('new_events', []))
+    return jsonify({'status': 'done', 'total': total_new})
+
+@app.route('/api/knowledge/<book_id>/graph', methods=['GET'])
+def knowledge_graph(book_id):
+    _require_book_access(book_id)
+    center = request.args.get('center')
+    depth = min(int(request.args.get('depth', 2)), 5)
+    data = knowledge_graph_engine.get_graph_data(book_id, center_entity=center, depth=depth)
+    return jsonify(data)
+
+@app.route('/api/knowledge/<book_id>/entity/<name>', methods=['GET'])
+def knowledge_entity(book_id, name):
+    _require_book_access(book_id)
+    result = knowledge_graph_engine.query_entity(book_id, name)
+    return jsonify(result)
+
+@app.route('/api/knowledge/<book_id>/relation', methods=['GET'])
+def knowledge_relation(book_id):
+    _require_book_access(book_id)
+    a = request.args.get('a', '')
+    b = request.args.get('b', '')
+    result = knowledge_graph_engine.query_relation_evolution(book_id, a, b)
+    return jsonify(result)
+
+@app.route('/api/knowledge/<book_id>/events', methods=['GET'])
+def knowledge_events(book_id):
+    _require_book_access(book_id)
+    node_id = request.args.get('node_id')
+    actor = request.args.get('actor')
+    events = db.get_story_events(book_id, node_id=node_id, actor_node_id=actor)
+    return jsonify(events)
+
+@app.route('/api/knowledge/<book_id>/nodes/merge', methods=['POST'])
+def knowledge_merge(book_id):
+    _require_book_access(book_id)
+    data = _json_body()
+    node_ids = data.get('node_ids', [])
+    primary_id = data.get('primary_id', '')
+    knowledge_graph_engine.merge_duplicate_nodes(book_id, node_ids, primary_id)
+    return jsonify({'status': 'merged'})
+
+@app.route('/api/knowledge/<book_id>/edges/<edge_id>', methods=['PUT'])
+def knowledge_edge_update(book_id, edge_id):
+    _require_book_access(book_id)
+    data = _json_body()
+    status = data.get('status', 'confirmed')
+    db.update_knowledge_edge_status(edge_id, status)
+    return jsonify({'status': status})
+
+# ===================== Foreshadow Payoff API =====================
+
+@app.route('/api/foreshadow/<book_id>/scan-payoffs', methods=['POST'])
+def foreshadow_scan_payoffs(book_id):
+    _require_book_access(book_id)
+    data = _json_body()
+    node_id = data.get('node_id', '')
+    text = data.get('text', '')
+    if not text and node_id:
+        conn = db._conn()
+        row = conn.execute('SELECT content FROM node_contents WHERE node_id=?', (node_id,)).fetchone()
+        conn.close()
+        if row:
+            from database import decrypt
+            text = decrypt(row['content'] or '')
+    results = foreshadow_engine.scan_for_payoffs(book_id, node_id, text)
+    return jsonify({'payoffs': results})
+
+@app.route('/api/foreshadow/<book_id>/apply-payoff', methods=['POST'])
+def foreshadow_apply_payoff(book_id):
+    _require_book_access(book_id)
+    data = _json_body()
+    foreshadow_id = data.get('foreshadow_id', '')
+    node_id = data.get('node_id', '')
+    payoff_type = data.get('payoff_type', 'resolved')
+    evidence = data.get('evidence', '')
+    chapter_title = data.get('chapter_title', '')
+    foreshadow_engine.apply_payoff(foreshadow_id, node_id, payoff_type, evidence, chapter_title)
+    return jsonify({'status': 'applied'})
+
+@app.route('/api/foreshadow/<book_id>/undo-payoff', methods=['POST'])
+def foreshadow_undo_payoff(book_id):
+    _require_book_access(book_id)
+    data = _json_body()
+    foreshadow_id = data.get('foreshadow_id', '')
+    foreshadow_engine.undo_payoff(foreshadow_id)
+    return jsonify({'status': 'undone'})
+
+@app.route('/api/foreshadow/<book_id>/payoff-history', methods=['GET'])
+def foreshadow_payoff_history(book_id):
+    _require_book_access(book_id)
+    foreshadow_id = request.args.get('foreshadow_id')
+    return jsonify(foreshadow_engine.get_payoff_history(book_id, foreshadow_id))
+
+@app.route('/api/foreshadow/<book_id>/density', methods=['GET'])
+def foreshadow_density(book_id):
+    _require_book_access(book_id)
+    return jsonify(foreshadow_engine.get_foreshadow_density(book_id))
+
+# ===================== Narrative Analysis API =====================
+
+@app.route('/api/narrative/<book_id>/analyze', methods=['POST'])
+def narrative_analyze(book_id):
+    _require_book_access(book_id)
+    data = _json_body()
+    node_id = data.get('node_id', '')
+    summary = data.get('summary')
+    result = narrative_engine.analyze_chapter(book_id, node_id, summary)
+    return jsonify(result or {})
+
+@app.route('/api/narrative/<book_id>/analyze-all', methods=['POST'])
+def narrative_analyze_all(book_id):
+    _require_book_access(book_id)
+    results = narrative_engine.analyze_book(book_id)
+    return jsonify({'count': len(results), 'results': results})
+
+@app.route('/api/narrative/<book_id>/tension', methods=['GET'])
+def narrative_tension(book_id):
+    _require_book_access(book_id)
+    volume_id = request.args.get('volume_id')
+    return jsonify(narrative_engine.get_tension_curve(book_id, volume_id))
+
+@app.route('/api/narrative/<book_id>/emotions', methods=['GET'])
+def narrative_emotions(book_id):
+    _require_book_access(book_id)
+    volume_id = request.args.get('volume_id')
+    return jsonify(narrative_engine.get_emotion_profile(book_id, volume_id))
+
+@app.route('/api/narrative/<book_id>/character-arcs', methods=['GET'])
+def narrative_character_arcs(book_id):
+    _require_book_access(book_id)
+    names = request.args.getlist('name')
+    return jsonify(narrative_engine.get_character_arcs(book_id, names or None))
+
+@app.route('/api/narrative/<book_id>/pacing', methods=['GET'])
+def narrative_pacing(book_id):
+    _require_book_access(book_id)
+    return jsonify(narrative_engine.get_pacing_diagnosis(book_id))
+
+@app.route('/api/narrative/<book_id>/completeness', methods=['GET'])
+def narrative_completeness(book_id):
+    _require_book_access(book_id)
+    volume_id = request.args.get('volume_id')
+    return jsonify(narrative_engine.get_arc_completeness(book_id, volume_id))
+
 # ===================== 启动 =====================
 
 if __name__ == '__main__':
     db.init_db()
+    debug_mode = os.environ.get('FLASK_DEBUG', '0') == '1'
     print("=" * 60)
     print("  AI 辅助长篇小说写作平台")
-    print("  访问 http://localhost:5000")
+    print(f"  访问 http://localhost:5000  (debug={debug_mode})")
     print("=" * 60)
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)
+    socketio.run(app, host='0.0.0.0', port=5000, debug=debug_mode,
+                 allow_unsafe_werkzeug=debug_mode)

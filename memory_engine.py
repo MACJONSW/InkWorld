@@ -52,10 +52,20 @@ class MemoryEngine:
         self._chunk_overlap = 100 # 切片重叠
         self._summarizer_callback = None  # (book_id, node_id, chapter_title, text) -> summary_text
         self._jieba_user_dict_loaded = {}  # book_id -> bool
+        self._embedding_engine = None
+        self._disambiguation_engine = None
 
     def set_summarizer_callback(self, callback):
         """注入摘要生成回调，签名: callback(book_id, node_id, chapter_title, text) -> summary_text"""
         self._summarizer_callback = callback
+
+    def set_embedding_engine(self, engine):
+        """注入 embedding 引擎"""
+        self._embedding_engine = engine
+
+    def set_disambiguation_engine(self, engine):
+        """注入消歧引擎"""
+        self._disambiguation_engine = engine
 
     # ------ jieba 动态词典 ------
 
@@ -230,8 +240,65 @@ class MemoryEngine:
 
         return {'status': 'ok', 'chunk_count': len(all_chunks), 'has_faiss': HAS_FAISS, 'has_bm25': HAS_BM25}
 
-    def vector_retrieve(self, book_id, query, top_k=5):
-        """混合检索：TF-IDF/FAISS + BM25（RRF 融合排序）"""
+    def incremental_update_index(self, book_id, node_id):
+        """Update the vector index for a single node without full rebuild"""
+        if book_id not in self._faiss_chunks:
+            # No existing index, do full build
+            return self.vectorize_book(book_id)
+
+        # Remove old chunks for this node
+        chunks = self._faiss_chunks.get(book_id, [])
+        chunks = [c for c in chunks if c.get('source_id') != node_id]
+
+        # Add new chunks for this node
+        content_data = self.db.get_node_content(node_id)
+        content = content_data.get('content', '') if content_data else ''
+        node = self.db.get_node(node_id)
+        if content:
+            for chunk in self._chunk_text(content):
+                chunks.append({
+                    'text': chunk,
+                    'source': 'content',
+                    'source_id': node_id,
+                    'name': node.get('title', '') if node else '',
+                    'category': 'chapter'
+                })
+
+        self._faiss_chunks[book_id] = chunks
+
+        # Rebuild vectors
+        if chunks:
+            texts = [c['text'] for c in chunks]
+            vectors = self._build_tfidf_vectors(texts)
+            if HAS_FAISS and len(vectors) > 0:
+                dim = vectors.shape[1]
+                index = faiss.IndexFlatIP(dim)
+                faiss.normalize_L2(vectors)
+                index.add(vectors)
+                self._faiss_indices[book_id] = index
+            else:
+                self._faiss_indices[book_id] = vectors
+            if HAS_BM25:
+                tokenized_corpus = [self._tokenize(t) for t in texts]
+                self._bm25_indices[book_id] = BM25Okapi(tokenized_corpus)
+
+        return {'status': 'ok', 'chunk_count': len(chunks)}
+
+    def vector_retrieve(self, book_id, query, top_k=5, user_id=None):
+        """混合检索：优先 embedding，降级到 TF-IDF/FAISS + BM25（RRF 融合排序），失败时回退到关键词匹配"""
+        # 优先使用 embedding 检索
+        if self._embedding_engine and user_id and self._embedding_engine.has_index(book_id):
+            try:
+                results = self._embedding_engine.retrieve(book_id, user_id, query, top_k)
+                if results:
+                    return results
+            except Exception as e:
+                logger.warning("Embedding retrieval failed, falling back to TF-IDF: %s", e)
+
+        return self._tfidf_retrieve(book_id, query, top_k)
+
+    def _tfidf_retrieve(self, book_id, query, top_k=5):
+        """TF-IDF + FAISS + BM25 混合检索"""
         if book_id not in self._faiss_chunks or not self._faiss_chunks[book_id]:
             self.vectorize_book(book_id)
 
@@ -239,59 +306,89 @@ class MemoryEngine:
         if not chunks:
             return []
 
-        # ---- TF-IDF 向量检索 ----
-        texts = [c['text'] for c in chunks]
-        texts.append(query)
-        vectors = self._build_tfidf_vectors(texts)
+        try:
+            # ---- TF-IDF 向量检索 ----
+            texts = [c['text'] for c in chunks]
+            texts.append(query)
+            vectors = self._build_tfidf_vectors(texts)
 
-        tfidf_ranking = {}  # idx -> rank (0-based)
-        if len(vectors) > 0:
-            query_vec = vectors[-1:].astype('float32')
-            doc_vecs = vectors[:-1].astype('float32')
+            tfidf_ranking = {}  # idx -> rank (0-based)
+            if len(vectors) > 0:
+                query_vec = vectors[-1:].astype('float32')
+                doc_vecs = vectors[:-1].astype('float32')
 
-            if HAS_FAISS and book_id in self._faiss_indices and isinstance(self._faiss_indices[book_id], faiss.Index):
-                index = self._faiss_indices[book_id]
-                faiss.normalize_L2(query_vec)
-                n = min(top_k * 3, len(chunks))
-                scores, indices = index.search(query_vec, n)
-                for rank, (score, idx) in enumerate(zip(scores[0], indices[0])):
-                    if 0 <= idx < len(chunks) and score > 0.01:
-                        tfidf_ranking[int(idx)] = rank
-            else:
-                from sklearn.metrics.pairwise import cosine_similarity as cos_sim
-                sims = cos_sim(query_vec, doc_vecs)[0]
-                sorted_indices = np.argsort(sims)[::-1][:top_k * 3]
-                for rank, idx in enumerate(sorted_indices):
-                    if sims[idx] > 0.05:
-                        tfidf_ranking[int(idx)] = rank
+                if HAS_FAISS and book_id in self._faiss_indices and isinstance(self._faiss_indices[book_id], faiss.Index):
+                    index = self._faiss_indices[book_id]
+                    faiss.normalize_L2(query_vec)
+                    n = min(top_k * 3, len(chunks))
+                    scores, indices = index.search(query_vec, n)
+                    for rank, (score, idx) in enumerate(zip(scores[0], indices[0])):
+                        if 0 <= idx < len(chunks) and score > 0.01:
+                            tfidf_ranking[int(idx)] = rank
+                else:
+                    from sklearn.metrics.pairwise import cosine_similarity as cos_sim
+                    sims = cos_sim(query_vec, doc_vecs)[0]
+                    sorted_indices = np.argsort(sims)[::-1][:top_k * 3]
+                    for rank, idx in enumerate(sorted_indices):
+                        if sims[idx] > 0.05:
+                            tfidf_ranking[int(idx)] = rank
 
-        # ---- BM25 检索 ----
-        bm25_ranking = {}  # idx -> rank
-        if HAS_BM25 and book_id in self._bm25_indices:
-            query_tokens = self._tokenize(query)
-            bm25_scores = self._bm25_indices[book_id].get_scores(query_tokens)
-            sorted_bm25 = np.argsort(bm25_scores)[::-1][:top_k * 3]
-            for rank, idx in enumerate(sorted_bm25):
-                if bm25_scores[idx] > 0:
-                    bm25_ranking[int(idx)] = rank
+            # ---- BM25 检索 ----
+            bm25_ranking = {}  # idx -> rank
+            if HAS_BM25 and book_id in self._bm25_indices:
+                query_tokens = self._tokenize(query)
+                bm25_scores = self._bm25_indices[book_id].get_scores(query_tokens)
+                sorted_bm25 = np.argsort(bm25_scores)[::-1][:top_k * 3]
+                for rank, idx in enumerate(sorted_bm25):
+                    if bm25_scores[idx] > 0:
+                        bm25_ranking[int(idx)] = rank
 
-        # ---- RRF 融合 ----
-        k = 60  # RRF 常数
-        all_idx = set(tfidf_ranking.keys()) | set(bm25_ranking.keys())
-        rrf_scores = {}
-        for idx in all_idx:
-            score = 0.0
-            if idx in tfidf_ranking:
-                score += 1.0 / (k + tfidf_ranking[idx])
-            if idx in bm25_ranking:
-                score += 1.0 / (k + bm25_ranking[idx])
-            rrf_scores[idx] = score
+            # ---- RRF 融合 ----
+            k = 60  # RRF 常数
+            all_idx = set(tfidf_ranking.keys()) | set(bm25_ranking.keys())
+            rrf_scores = {}
+            for idx in all_idx:
+                score = 0.0
+                if idx in tfidf_ranking:
+                    score += 1.0 / (k + tfidf_ranking[idx])
+                if idx in bm25_ranking:
+                    score += 1.0 / (k + bm25_ranking[idx])
+                rrf_scores[idx] = score
 
-        sorted_results = sorted(rrf_scores.items(), key=lambda x: -x[1])[:top_k]
+            sorted_results = sorted(rrf_scores.items(), key=lambda x: -x[1])[:top_k]
+            results = []
+            for idx, score in sorted_results:
+                r = dict(chunks[idx])
+                r['score'] = round(score, 4)
+                results.append(r)
+            return results
+
+        except Exception as e:
+            logger.warning("Vector retrieval failed, falling back to keyword matching: %s", e)
+            return self._keyword_fallback_retrieve(chunks, query, top_k)
+
+    def _keyword_fallback_retrieve(self, chunks, query, top_k=5):
+        """Fallback keyword matching when vector retrieval fails"""
+        query_lower = query.lower()
+        # Extract keywords from query (split on whitespace and punctuation)
+        query_terms = [t.strip() for t in re.split(r'[\s，。、！？,.!?\-;；：:]+', query_lower) if t.strip() and len(t.strip()) >= 2]
+        if not query_terms:
+            return []
+
+        scored = []
+        for idx, chunk in enumerate(chunks):
+            chunk_lower = chunk['text'].lower()
+            match_count = 0
+            for term in query_terms:
+                match_count += chunk_lower.count(term)
+            if match_count > 0:
+                scored.append((idx, match_count))
+
+        scored.sort(key=lambda x: -x[1])
         results = []
-        for idx, score in sorted_results:
+        for idx, match_count in scored[:top_k]:
             r = dict(chunks[idx])
-            r['score'] = round(score, 4)
+            r['score'] = round(match_count / max(len(query_terms), 1), 4)
             results.append(r)
         return results
 
@@ -318,14 +415,35 @@ class MemoryEngine:
         Tier 3: 向量RAG (相关设定检索) -- 自动触发
         + 全局设定注入
         """
+        result = self._build_context_impl(book_id, current_node_id, max_chars=max_chars, track=False)
+        return result['context_text']
+
+    def build_context_window_with_log(self, book_id, current_node_id, max_tokens=6000):
+        """Three-tier memory fusion with structured injection log"""
+        return self._build_context_impl(book_id, current_node_id, max_chars=max_tokens, track=True)
+
+    def _build_context_impl(self, book_id, current_node_id, max_chars=6000, track=False):
+        """Internal implementation for context window building with optional injection tracking."""
         context_parts = []
+        injected_items = []
+        candidate_items = []
 
         # Tier 0: 全局设定（常驻）
         entries = self.db.get_lorebook_entries(book_id)
         setting_text = ""
         for e in entries:
             if e.get('enabled'):
-                setting_text += f"【{e['category']}-{e['name']}】{e['content']}\n"
+                entry_text = f"【{e['category']}-{e['name']}】{e['content']}\n"
+                setting_text += entry_text
+                if track:
+                    injected_items.append({
+                        'type': 'lorebook',
+                        'source': e.get('id', ''),
+                        'content_preview': entry_text[:200],
+                        'reason': 'match_keyword',
+                        'source_chapter': '',
+                        'tier': 0
+                    })
         if setting_text:
             context_parts.append(f"=== 世界观设定 ===\n{setting_text[:2000]}")
 
@@ -336,11 +454,31 @@ class MemoryEngine:
                 f"[{s['chapter_title']}] {s['summary']}" for s in summaries
             ])
             context_parts.append(f"=== 前情摘要(Tier2) ===\n{summary_text[:2000]}")
+            if track:
+                for s in summaries:
+                    item_text = f"[{s['chapter_title']}] {s['summary']}"
+                    injected_items.append({
+                        'type': 'summary',
+                        'source': s.get('id', ''),
+                        'content_preview': item_text[:200],
+                        'reason': 'rolling_summary',
+                        'source_chapter': s.get('chapter_title', ''),
+                        'tier': 2
+                    })
 
         # Tier 1: 工作记忆
         working = self.get_working_memory(current_node_id, max_chars=3000)
         if working:
             context_parts.append(f"=== 工作记忆(Tier1) ===\n{working}")
+            if track:
+                injected_items.append({
+                    'type': 'working',
+                    'source': current_node_id or '',
+                    'content_preview': working[:200],
+                    'reason': 'current_editing_context',
+                    'source_chapter': '',
+                    'tier': 1
+                })
 
             reminder_text = self.build_character_reminder_context(
                 book_id,
@@ -350,6 +488,15 @@ class MemoryEngine:
             )
             if reminder_text:
                 context_parts.append(reminder_text)
+                if track:
+                    injected_items.append({
+                        'type': 'character_reminder',
+                        'source': current_node_id or '',
+                        'content_preview': reminder_text[:200],
+                        'reason': 'character_mention_in_working_memory',
+                        'source_chapter': '',
+                        'tier': 1
+                    })
 
             # Tier 3: 向量RAG检索（基于工作记忆的相关片段）
             rag_results = self.vector_retrieve(book_id, working[-500:], top_k=3)
@@ -359,18 +506,78 @@ class MemoryEngine:
                     for r in rag_results
                 ])
                 context_parts.append(f"=== 向量检索(Tier3) ===\n{rag_text}")
+                if track:
+                    for r in rag_results:
+                        injected_items.append({
+                            'type': 'vector',
+                            'source': r.get('source_id', ''),
+                            'content_preview': r['text'][:200],
+                            'reason': 'vector_similarity',
+                            'source_chapter': r.get('name', ''),
+                            'tier': 3
+                        })
 
-        return "\n\n".join(context_parts)
+            # Track candidate items from vector search that were not included
+            if track:
+                all_rag = self.vector_retrieve(book_id, working[-500:], top_k=10)
+                included_sources = {r.get('source_id', '') for r in rag_results}
+                for r in all_rag:
+                    if r.get('source_id', '') not in included_sources:
+                        candidate_items.append({
+                            'type': 'vector',
+                            'source': r.get('source_id', ''),
+                            'content_preview': r['text'][:200],
+                            'reason': 'vector_similarity_below_cutoff',
+                            'source_chapter': r.get('name', ''),
+                            'tier': 3,
+                            'score': r.get('score', 0)
+                        })
+
+        return {
+            'context_text': "\n\n".join(context_parts),
+            'injected_items': injected_items,
+            'candidate_items': candidate_items
+        }
 
     def _character_entries(self, book_id):
         entries = self.db.get_lorebook_entries(book_id)
         return [e for e in entries if e.get('category') == 'character' and e.get('enabled', True)]
+
+    def get_pinned_memories(self, book_id):
+        """Get all pinned/excluded memory directives"""
+        return self.db.get_pinned_memories(book_id)
+
+    def _apply_pin_exclude(self, book_id, items, memory_type):
+        """Filter items based on pin/exclude directives.
+        Pinned items are always included, excluded items are removed."""
+        pins = self.get_pinned_memories(book_id)
+        pin_refs = {p['memory_ref'] for p in pins if p['action'] == 'pin' and p['memory_type'] == memory_type}
+        exclude_refs = {p['memory_ref'] for p in pins if p['action'] == 'exclude' and p['memory_type'] == memory_type}
+
+        result = []
+        pinned = []
+        for item in items:
+            ref = item.get('id', '') or item.get('name', '')
+            if ref in exclude_refs:
+                continue
+            if ref in pin_refs:
+                pinned.append(item)
+            else:
+                result.append(item)
+        return pinned + result
 
     def _character_terms(self, entry):
         terms = []
         name = (entry.get('name') or '').strip()
         if name:
             terms.append(name)
+        # Add aliases
+        aliases = (entry.get('aliases') or '').strip()
+        if aliases:
+            for alias in aliases.split(','):
+                alias = alias.strip()
+                if alias and alias not in terms:
+                    terms.append(alias)
         keywords = entry.get('keywords', '') or ''
         for keyword in keywords.split(','):
             cleaned = keyword.strip()
@@ -395,9 +602,20 @@ class MemoryEngine:
         mentions = []
         for entry in self._character_entries(book_id):
             terms = self._character_terms(entry)
+
+            # Parse keyword_weights for confidence calculation
+            keyword_weights = {}
+            kw_weights_raw = entry.get('keyword_weights', '') or ''
+            if kw_weights_raw:
+                try:
+                    keyword_weights = json.loads(kw_weights_raw)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
             count = 0
             first_index = None
             matched_terms = []
+            weighted_score = 0.0
             for term in terms:
                 if not term:
                     continue
@@ -413,17 +631,28 @@ class MemoryEngine:
                 if hit_count <= 0:
                     continue
                 count += hit_count
+                weight = keyword_weights.get(term, 1.0)
+                weighted_score += hit_count * weight
                 idx = lowered.find(term_lower)
                 if first_index is None or idx < first_index:
                     first_index = idx
                 matched_terms.append(term)
+
             if count > 0:
+                # Calculate confidence based on weighted score and co-occurrence
+                # Co-occurrence bonus: matching multiple distinct terms increases confidence
+                co_occurrence_bonus = min(len(matched_terms) / max(len(terms), 1), 1.0)
+                # Normalize weighted_score: cap at a reasonable level
+                raw_confidence = weighted_score / max(len(terms), 1)
+                confidence = min(raw_confidence * (1.0 + co_occurrence_bonus * 0.5), 1.0)
+
                 mentions.append({
                     'name': entry.get('name', ''),
                     'entry': entry,
                     'count': count,
                     'first_index': first_index if first_index is not None else len(text),
-                    'matched_terms': matched_terms
+                    'matched_terms': matched_terms,
+                    'confidence': round(confidence, 4)
                 })
 
         mentions.sort(key=lambda item: (-item['count'], item['first_index'], item['name']))
@@ -886,3 +1115,14 @@ class MemoryEngine:
                 'has_faiss': HAS_FAISS
             }
         }
+
+    def save_injection_log(self, book_id, node_id, agent_role, injected_items, candidate_items=None):
+        """Save injection log to database for explainability panel"""
+        import json as _json
+        self.db.add_memory_injection_log({
+            'book_id': book_id,
+            'node_id': node_id,
+            'agent_role': agent_role,
+            'injected_items': _json.dumps(injected_items, ensure_ascii=False),
+            'candidate_items': _json.dumps(candidate_items or [], ensure_ascii=False)
+        })

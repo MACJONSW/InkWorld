@@ -190,7 +190,11 @@ const App = {
         const t = document.createElement('div');
         t.className = `toast ${type}`;
         const icons = { success: 'check-circle', error: 'circle-xmark', info: 'circle-info', warning: 'triangle-exclamation' };
-        t.innerHTML = `<i class="fas fa-${icons[type] || 'circle-info'}"></i> ${msg}`;
+        const icon = document.createElement('i');
+        icon.className = `fas fa-${icons[type] || 'circle-info'}`;
+        t.textContent = '';
+        t.appendChild(icon);
+        t.appendChild(document.createTextNode(' ' + msg));
         container.appendChild(t);
         setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 300); }, 3500);
     },
@@ -629,7 +633,7 @@ const App = {
             if (res.entries && res.entries.length > 0) {
                 res.entries.forEach(e => {
                     html += `<div class="entity-result-item">
-                        <div class="entity-result-name">${this.escHtml(e.name)} <small>(${e.category})</small></div>
+                        <div class="entity-result-name">${this.escHtml(e.name)} <small>(${this.escHtml(e.category)})</small></div>
                         <div class="entity-result-content">${this.escHtml(e.content || e.description)}</div>
                     </div>`;
                 });
@@ -637,8 +641,8 @@ const App = {
             if (res.relations && res.relations.length > 0) {
                 res.relations.forEach(r => {
                     html += `<div class="entity-result-item">
-                        <div class="entity-result-name">${r.source_entity} → ${r.target_entity}</div>
-                        <div class="entity-result-content">${r.relation_type}: ${r.relation_value}</div>
+                        <div class="entity-result-name">${this.escHtml(r.source_entity)} → ${this.escHtml(r.target_entity)}</div>
+                        <div class="entity-result-content">${this.escHtml(r.relation_type)}: ${this.escHtml(r.relation_value)}</div>
                     </div>`;
                 });
             }
@@ -965,6 +969,9 @@ const App = {
         document.getElementById('tab' + tab.charAt(0).toUpperCase() + tab.slice(1)).classList.add('active');
         if (tab === 'memory') {
             this.loadCharacterReminders();
+        }
+        if (tab === 'analysis') {
+            this.loadNarrativeAnalysis();
         }
     },
 
@@ -1661,11 +1668,13 @@ const App = {
         document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
         event.target.classList.add('active');
         document.querySelectorAll('.settings-content').forEach(c => c.classList.remove('active'));
-        const map = { models: 'settingsModels', routing: 'settingsRouting', params: 'settingsParams', tokens: 'settingsTokens' };
+        const map = { models: 'settingsModels', routing: 'settingsRouting', params: 'settingsParams', rules: 'settingsRules', tokens: 'settingsTokens', stats: 'settingsStats' };
         document.getElementById(map[tab]).classList.add('active');
 
         if (tab === 'routing') this.loadRoutingGrid();
         if (tab === 'tokens') this.loadTokenStats();
+        if (tab === 'rules') this.loadRuleSets();
+        if (tab === 'stats') this.loadStatsDashboard();
     },
 
     // 模型管理
@@ -1680,7 +1689,7 @@ const App = {
             <div class="model-card">
                 <div class="model-card-info">
                     <div class="model-card-name">${this.escHtml(m.name)}</div>
-                    <div class="model-card-detail">${m.provider} | ${m.model_id} | Key: ${m.api_key_display} | Max: ${m.max_context}</div>
+                    <div class="model-card-detail">${this.escHtml(m.provider)} | ${this.escHtml(m.model_id)} | Key: ${this.escHtml(m.api_key_display)} | Max: ${m.max_context}</div>
                 </div>
                 <div class="model-card-actions">
                     <button class="btn btn-xs btn-ghost" onclick="App.editModel('${m.id}')"><i class="fas fa-pen"></i></button>
@@ -2835,6 +2844,1016 @@ const App = {
     escJs(str) {
         if (!str) return '';
         return str.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n');
+    },
+
+    // ==================== Agent Group Switching ====================
+    switchAgentGroup(group) {
+        document.querySelectorAll('.agent-group-tab').forEach(t => t.classList.remove('active'));
+        event.target.closest('.agent-group-tab').classList.add('active');
+        document.querySelectorAll('.agent-group[data-group]').forEach(g => g.classList.remove('active'));
+        const target = document.querySelector(`.agent-group[data-group="${group}"]`);
+        if (target) target.classList.add('active');
+    },
+
+    // ==================== Global Search ====================
+    openGlobalSearch() {
+        document.getElementById('searchModal').style.display = 'flex';
+        document.getElementById('globalSearchInput').focus();
+    },
+    closeGlobalSearch() {
+        document.getElementById('searchModal').style.display = 'none';
+    },
+    async doGlobalSearch() {
+        if (!this.currentBookId) { this.toast('请先选择书籍', 'warning'); return; }
+        const query = document.getElementById('globalSearchInput').value.trim();
+        if (!query) return;
+        const scope = document.getElementById('globalSearchScope').value || null;
+        const res = await this.api(`/api/search/${this.currentBookId}`, 'POST', { query, scope });
+        if (!res) return;
+        const container = document.getElementById('globalSearchResults');
+        let html = '';
+        const groups = { content: '正文', summary: '摘要', lorebook: '设定', character_history: '角色历史', world_state: '世界状态' };
+        for (const [key, label] of Object.entries(groups)) {
+            const items = res[key] || [];
+            if (items.length === 0) continue;
+            html += `<div class="search-result-group"><h4>${label} (${items.length})</h4>`;
+            items.forEach(item => {
+                const title = item.title || item.name || item.chapter_title || item.entity_name || '';
+                const excerpt = item.excerpts ? item.excerpts[0] : (item.excerpt || item.state_value || '');
+                html += `<div class="search-result-item"><div class="result-title">${this.escHtml(title)}</div><div class="result-excerpt">${this.escHtml(excerpt)}</div></div>`;
+            });
+            html += '</div>';
+        }
+        container.innerHTML = html || '<p class="settings-hint">无结果</p>';
+    },
+    showReplacePanel() {
+        const panel = document.getElementById('replacePanel');
+        panel.style.display = panel.style.display === 'none' ? 'flex' : 'none';
+    },
+    async previewReplace() {
+        if (!this.currentBookId) return;
+        const search = document.getElementById('replaceSearchText').value;
+        const replace = document.getElementById('replaceNewText').value;
+        if (!search) return;
+        const res = await this.api(`/api/search/${this.currentBookId}/replace`, 'POST', { search_text: search, replace_text: replace, preview_only: true });
+        if (res) {
+            this.toast(`将影响 ${res.affected_chapters} 个章节，共 ${res.total_replacements} 处`, 'info');
+        }
+    },
+    async executeReplace() {
+        if (!this.currentBookId) return;
+        const search = document.getElementById('replaceSearchText').value;
+        const replace = document.getElementById('replaceNewText').value;
+        if (!search || !confirm(`确认将全书中的"${search}"替换为"${replace}"？此操作不可撤销。`)) return;
+        const res = await this.api(`/api/search/${this.currentBookId}/replace`, 'POST', { search_text: search, replace_text: replace, preview_only: false });
+        if (res) {
+            this.toast(`已替换 ${res.total_replacements} 处`, 'success');
+            if (this.currentNodeId) this.loadNodeContent(this.currentNodeId);
+        }
+    },
+
+    // ==================== Timeline ====================
+    async loadTimeline() {
+        if (!this.currentBookId) return;
+        const entity = document.getElementById('timelineEntityFilter').value || undefined;
+        const type = document.getElementById('timelineTypeFilter').value || undefined;
+        let url = `/api/timeline/${this.currentBookId}?`;
+        if (entity) url += `entity_name=${encodeURIComponent(entity)}&`;
+        if (type) url += `event_type=${encodeURIComponent(type)}&`;
+        const events = await this.api(url, 'GET');
+        const container = document.getElementById('timelineList');
+        if (!events || events.length === 0) {
+            container.innerHTML = '<p class="agent-hint">暂无时间线事件</p>';
+            return;
+        }
+        container.innerHTML = events.map(ev => `
+            <div class="timeline-event">
+                <div class="event-entity">${this.escHtml(ev.entity_name)}</div>
+                <div class="event-desc">${this.escHtml(ev.description)}</div>
+                <div class="event-meta">
+                    <span class="event-location">${ev.location ? '@' + this.escHtml(ev.location) : ''}</span>
+                    <span>${ev.event_type || ''}</span>
+                </div>
+            </div>
+        `).join('');
+    },
+    async addTimelineEvent() {
+        if (!this.currentBookId) { this.toast('请先选择书籍', 'warning'); return; }
+        const entity = prompt('实体名称（角色/物品等）:');
+        if (!entity) return;
+        const desc = prompt('事件描述:');
+        if (!desc) return;
+        const location = prompt('地点（可选）:') || '';
+        await this.api(`/api/timeline/${this.currentBookId}/events`, 'POST', {
+            entity_name: entity, description: desc, location, event_type: 'action'
+        });
+        this.toast('事件已添加', 'success');
+        this.loadTimeline();
+    },
+    async extractTimelineEvents() {
+        if (!this.currentBookId || !this.currentNodeId) { this.toast('请选择章节', 'warning'); return; }
+        this.toast('正在提取事件...', 'info');
+        const res = await this.api(`/api/timeline/${this.currentBookId}/extract`, 'POST', { node_id: this.currentNodeId });
+        if (res) {
+            this.toast(`提取了 ${res.created_count || 0} 个事件`, 'success');
+            this.loadTimeline();
+        }
+    },
+    async detectTimelineConflicts() {
+        if (!this.currentBookId) { this.toast('请先选择书籍', 'warning'); return; }
+        const res = await this.api(`/api/timeline/${this.currentBookId}/detect-conflicts`, 'POST');
+        if (res && res.conflicts) {
+            if (res.conflicts.length === 0) {
+                this.toast('未发现时间线冲突', 'success');
+            } else {
+                this.toast(`发现 ${res.conflicts.length} 个冲突`, 'warning');
+            }
+        }
+    },
+
+    // ==================== Consistency Report ====================
+    openConsistencyPanel() {
+        if (!this.currentBookId) { this.toast('请先选择书籍', 'warning'); return; }
+        document.getElementById('consistencyModal').style.display = 'flex';
+        this.loadConsistencyReports();
+    },
+    closeConsistencyPanel() {
+        document.getElementById('consistencyModal').style.display = 'none';
+    },
+    async runConsistencyScan() {
+        if (!this.currentBookId) return;
+        this.toast('正在发起全书扫描...', 'info');
+        document.getElementById('consistencyStatus').textContent = '扫描中...';
+        const res = await this.api(`/api/consistency/${this.currentBookId}/scan`, 'POST');
+        if (res && res.report_id) {
+            this.toast('扫描完成', 'success');
+            this.loadConsistencyReport(res.report_id);
+        }
+    },
+    async loadConsistencyReports() {
+        const res = await this.api(`/api/consistency/${this.currentBookId}/reports`, 'GET');
+        if (res && res.length > 0) {
+            this.loadConsistencyReport(res[0].id);
+        }
+    },
+    async loadConsistencyReport(reportId) {
+        const res = await this.api(`/api/consistency/${this.currentBookId}/reports/${reportId}`, 'GET');
+        if (!res) return;
+        document.getElementById('consistencyStatus').textContent = res.status === 'completed' ? '已完成' : res.status;
+        document.getElementById('consistencySummary').style.display = 'block';
+        document.getElementById('consistencyHigh').textContent = res.high_count || 0;
+        document.getElementById('consistencyMedium').textContent = res.medium_count || 0;
+        document.getElementById('consistencyLow').textContent = res.low_count || 0;
+        const issues = res.issues || [];
+        document.getElementById('consistencyIssues').innerHTML = issues.map(issue => `
+            <div class="consistency-issue ${issue.severity}">
+                <div class="issue-title">${this.escHtml(issue.title)}</div>
+                <div class="issue-desc">${this.escHtml(issue.description)}</div>
+                <div class="issue-actions">
+                    <button class="btn btn-xs btn-ghost" onclick="App.resolveIssue('${issue.id}', 'ignored')">忽略</button>
+                    <button class="btn btn-xs btn-primary" onclick="App.resolveIssue('${issue.id}', 'fixed')">已修复</button>
+                    <button class="btn btn-xs btn-ghost" onclick="App.resolveIssue('${issue.id}', 'exception')">设为例外</button>
+                </div>
+            </div>
+        `).join('');
+    },
+    async resolveIssue(issueId, resolution) {
+        await this.api(`/api/consistency/issues/${issueId}`, 'PUT', { resolution });
+        this.toast('已更新', 'success');
+    },
+
+    // ==================== Job Center ====================
+    openJobCenter() {
+        document.getElementById('jobModal').style.display = 'flex';
+        this.loadJobs();
+    },
+    closeJobCenter() {
+        document.getElementById('jobModal').style.display = 'none';
+    },
+    async loadJobs() {
+        const res = await this.api('/api/jobs', 'GET');
+        const container = document.getElementById('jobList');
+        if (!res || res.length === 0) {
+            container.innerHTML = '<p class="settings-hint">暂无任务</p>';
+            document.getElementById('jobBadge').style.display = 'none';
+            return;
+        }
+        const running = res.filter(j => j.status === 'running');
+        const badge = document.getElementById('jobBadge');
+        if (running.length > 0) {
+            badge.style.display = 'inline';
+            badge.textContent = running.length;
+        } else {
+            badge.style.display = 'none';
+        }
+        container.innerHTML = res.map(job => `
+            <div class="job-item">
+                <div class="job-header">
+                    <span class="job-type">${this.escHtml(job.job_type)}</span>
+                    <span class="job-status ${job.status}">${job.status}</span>
+                </div>
+                ${job.status === 'running' ? `<div class="job-progress"><div class="job-progress-bar"><div class="job-progress-fill" style="width:${job.progress || 0}%"></div></div></div>` : ''}
+                ${job.error_message ? `<div style="font-size:11px;color:var(--danger);margin-top:4px;">${this.escHtml(job.error_message)}</div>` : ''}
+                <div style="margin-top:6px;display:flex;gap:4px;">
+                    ${job.status === 'running' ? `<button class="btn btn-xs btn-danger" onclick="App.cancelJob('${job.id}')">取消</button>` : ''}
+                    ${job.status === 'failed' ? `<button class="btn btn-xs btn-primary" onclick="App.retryJob('${job.id}')">重试</button>` : ''}
+                </div>
+            </div>
+        `).join('');
+    },
+    async cancelJob(jobId) {
+        await this.api(`/api/jobs/${jobId}/cancel`, 'POST');
+        this.toast('已取消', 'info');
+        this.loadJobs();
+    },
+    async retryJob(jobId) {
+        await this.api(`/api/jobs/${jobId}/retry`, 'POST');
+        this.toast('已重试', 'info');
+        this.loadJobs();
+    },
+
+    // ==================== Workflow ====================
+    _currentWorkflowRunId: null,
+    _currentWorkflowStep: 0,
+    async startWorkflow() {
+        if (!this.currentBookId || !this.currentNodeId) { this.toast('请选择章节', 'warning'); return; }
+        document.getElementById('workflowModal').style.display = 'flex';
+        const res = await this.api('/api/workflow/run', 'POST', {
+            book_id: this.currentBookId, node_id: this.currentNodeId,
+            goals: document.getElementById('workflowGoals').value || ''
+        });
+        if (res && res.run_id) {
+            this._currentWorkflowRunId = res.run_id;
+            this._currentWorkflowStep = 0;
+            this.loadWorkflowStatus();
+        }
+    },
+    closeWorkflow() {
+        document.getElementById('workflowModal').style.display = 'none';
+    },
+    async loadWorkflowStatus() {
+        if (!this._currentWorkflowRunId) return;
+        const res = await this.api(`/api/workflow/run/${this._currentWorkflowRunId}`, 'GET');
+        if (!res) return;
+        const steps = res.step_results || [];
+        const container = document.getElementById('workflowSteps');
+        container.innerHTML = steps.map((s, i) => `
+            <div class="workflow-step ${s.status}">
+                <div class="step-num">${s.status === 'completed' ? '<i class="fas fa-check"></i>' : i + 1}</div>
+                <div class="step-name">${this.escHtml(s.name)}</div>
+                <div class="step-status">${s.status}</div>
+            </div>
+        `).join('');
+        this._currentWorkflowStep = res.current_step || 0;
+    },
+    async runWorkflowStep() {
+        if (!this._currentWorkflowRunId) return;
+        this.toast('正在执行步骤...', 'info');
+        const res = await this.api(`/api/workflow/run/${this._currentWorkflowRunId}/step/${this._currentWorkflowStep}`, 'POST', {
+            user_id: this.currentUser?.id
+        });
+        if (res) {
+            this.toast('步骤完成', 'success');
+            this._currentWorkflowStep++;
+            this.loadWorkflowStatus();
+        }
+    },
+
+    // ==================== Snapshots & Recycle Bin ====================
+    openSnapshots() {
+        if (!this.currentBookId) { this.toast('请先选择书籍', 'warning'); return; }
+        document.getElementById('snapshotModal').style.display = 'flex';
+        this.loadSnapshots();
+    },
+    closeSnapshots() {
+        document.getElementById('snapshotModal').style.display = 'none';
+    },
+    switchSnapshotTab(tab) {
+        document.querySelectorAll('.snapshot-tab').forEach(t => t.classList.remove('active'));
+        event.target.classList.add('active');
+        document.getElementById('snapshotList').style.display = tab === 'snapshots' ? 'block' : 'none';
+        document.getElementById('recycleList').style.display = tab === 'recycle' ? 'block' : 'none';
+        if (tab === 'recycle') this.loadRecycleBin();
+    },
+    async loadSnapshots() {
+        const res = await this.api(`/api/snapshots/${this.currentBookId}`, 'GET');
+        const container = document.getElementById('snapshotList');
+        if (!res || res.length === 0) {
+            container.innerHTML = '<p class="settings-hint">暂无快照</p>';
+            return;
+        }
+        container.innerHTML = res.map(s => `
+            <div class="snapshot-item">
+                <div class="snap-info">
+                    <div class="snap-label">${this.escHtml(s.label || s.snapshot_type)}</div>
+                    <div class="snap-meta">${s.created_at || ''}</div>
+                </div>
+                <button class="btn btn-xs btn-primary" onclick="App.restoreSnapshot('${s.id}')">恢复</button>
+            </div>
+        `).join('');
+    },
+    async restoreSnapshot(snapshotId) {
+        if (!confirm('确认恢复此快照？当前内容将被覆盖。')) return;
+        await this.api(`/api/snapshots/${snapshotId}/restore`, 'POST');
+        this.toast('已恢复', 'success');
+        if (this.currentNodeId) this.loadNodeContent(this.currentNodeId);
+    },
+    async loadRecycleBin() {
+        const res = await this.api(`/api/recycle-bin/${this.currentBookId}`, 'GET');
+        const container = document.getElementById('recycleList');
+        if (!res || res.length === 0) {
+            container.innerHTML = '<p class="settings-hint">回收站为空</p>';
+            return;
+        }
+        container.innerHTML = res.map(item => `
+            <div class="recycle-item">
+                <div class="recycle-info">
+                    <div class="recycle-type">${this.escHtml(item.item_type)}</div>
+                    <div class="recycle-name">${item.deleted_at || ''}</div>
+                </div>
+                <div>
+                    <button class="btn btn-xs btn-primary" onclick="App.restoreRecycleItem('${item.id}')">恢复</button>
+                    <button class="btn btn-xs btn-danger" onclick="App.deleteRecycleItem('${item.id}')">永久删除</button>
+                </div>
+            </div>
+        `).join('');
+    },
+    async restoreRecycleItem(itemId) {
+        await this.api(`/api/recycle-bin/${itemId}/restore`, 'POST');
+        this.toast('已恢复', 'success');
+        this.loadRecycleBin();
+        this.loadDocTree();
+    },
+    async deleteRecycleItem(itemId) {
+        if (!confirm('永久删除？此操作不可撤销。')) return;
+        await this.api(`/api/recycle-bin/${itemId}`, 'DELETE');
+        this.toast('已删除', 'info');
+        this.loadRecycleBin();
+    },
+
+    // ==================== Writing Rules ====================
+    async loadRuleSets() {
+        if (!this.currentBookId) return;
+        const res = await this.api(`/api/rules/${this.currentBookId}/sets`, 'GET');
+        const container = document.getElementById('ruleSetsList');
+        if (!res || res.length === 0) {
+            container.innerHTML = '<p class="settings-hint">暂无规则集。点击"新建规则集"开始。</p>';
+            return;
+        }
+        let html = '';
+        for (const set of res) {
+            const rules = await this.api(`/api/rules/${this.currentBookId}/rules?rule_set_id=${set.id}`, 'GET');
+            html += `<div class="rule-set-card">
+                <div class="rule-set-header">
+                    <span class="rule-set-name">${this.escHtml(set.name)}</span>
+                    <div>
+                        <button class="btn btn-xs btn-primary" onclick="App.addRule('${set.id}')"><i class="fas fa-plus"></i></button>
+                        <button class="btn btn-xs btn-danger" onclick="App.deleteRuleSet('${set.id}')"><i class="fas fa-trash"></i></button>
+                    </div>
+                </div>
+                <div class="rules-in-set">`;
+            if (rules && rules.length > 0) {
+                rules.forEach(r => {
+                    html += `<div class="rule-item">
+                        <span class="rule-cat">${r.category}</span>
+                        <span class="rule-name">${this.escHtml(r.title)}</span>
+                        <div>
+                            <button class="btn btn-xs btn-ghost" onclick="App.editRule('${r.id}', '${set.id}')"><i class="fas fa-edit"></i></button>
+                            <button class="btn btn-xs btn-ghost" onclick="App.deleteRule('${r.id}')"><i class="fas fa-trash"></i></button>
+                        </div>
+                    </div>`;
+                });
+            }
+            html += '</div></div>';
+        }
+        container.innerHTML = html;
+    },
+    async addRuleSet() {
+        if (!this.currentBookId) { this.toast('请先选择书籍', 'warning'); return; }
+        const name = prompt('规则集名称:');
+        if (!name) return;
+        await this.api(`/api/rules/${this.currentBookId}/sets`, 'POST', { name });
+        this.toast('已创建', 'success');
+        this.loadRuleSets();
+    },
+    async deleteRuleSet(setId) {
+        if (!confirm('删除此规则集及所有规则？')) return;
+        await this.api(`/api/rules/${this.currentBookId}/sets/${setId}`, 'DELETE');
+        this.loadRuleSets();
+    },
+    addRule(setId) {
+        document.getElementById('ruleEditId').value = '';
+        document.getElementById('ruleEditSetId').value = setId;
+        document.getElementById('ruleTitle').value = '';
+        document.getElementById('ruleContent').value = '';
+        document.getElementById('ruleEditModal').style.display = 'flex';
+    },
+    async editRule(ruleId, setId) {
+        const rules = await this.api(`/api/rules/${this.currentBookId}/rules?rule_set_id=${setId}`, 'GET');
+        const rule = (rules || []).find(r => r.id === ruleId);
+        if (!rule) return;
+        document.getElementById('ruleEditId').value = ruleId;
+        document.getElementById('ruleEditSetId').value = setId;
+        document.getElementById('ruleTitle').value = rule.title || '';
+        document.getElementById('ruleCategory').value = rule.category || 'style';
+        document.getElementById('ruleScope').value = rule.scope_type || 'book';
+        document.getElementById('ruleContent').value = rule.content || '';
+        document.getElementById('ruleEditModal').style.display = 'flex';
+    },
+    closeRuleEditModal() {
+        document.getElementById('ruleEditModal').style.display = 'none';
+    },
+    async saveRule() {
+        const id = document.getElementById('ruleEditId').value;
+        const setId = document.getElementById('ruleEditSetId').value;
+        const data = {
+            rule_set_id: setId,
+            title: document.getElementById('ruleTitle').value,
+            category: document.getElementById('ruleCategory').value,
+            scope_type: document.getElementById('ruleScope').value,
+            content: document.getElementById('ruleContent').value
+        };
+        if (id) {
+            await this.api(`/api/rules/${this.currentBookId}/rules/${id}`, 'PUT', data);
+        } else {
+            await this.api(`/api/rules/${this.currentBookId}/rules`, 'POST', data);
+        }
+        this.toast('规则已保存', 'success');
+        this.closeRuleEditModal();
+        this.loadRuleSets();
+    },
+    async deleteRule(ruleId) {
+        if (!confirm('删除此规则？')) return;
+        await this.api(`/api/rules/${this.currentBookId}/rules/${ruleId}`, 'DELETE');
+        this.loadRuleSets();
+    },
+    async checkRuleConflicts() {
+        if (!this.currentBookId) return;
+        const res = await this.api(`/api/rules/${this.currentBookId}/conflicts`, 'GET');
+        if (res && res.length > 0) {
+            this.toast(`发现 ${res.length} 个规则冲突`, 'warning');
+        } else {
+            this.toast('未发现规则冲突', 'success');
+        }
+    },
+
+    // ==================== Statistics Dashboard ====================
+    async loadStatsDashboard() {
+        if (!this.currentBookId) return;
+        const res = await this.api(`/api/stats/${this.currentBookId}/enhanced`, 'GET');
+        if (!res) return;
+        const container = document.getElementById('statsDashboard');
+        const totals = res.totals || {};
+        const agents = res.agents || [];
+        let html = `<div class="stats-grid">
+            <div class="stat-card"><div class="stat-value">${totals.total_calls || 0}</div><div class="stat-label">总调用次数</div></div>
+            <div class="stat-card"><div class="stat-value">${totals.success_rate || 0}%</div><div class="stat-label">成功率</div></div>
+            <div class="stat-card"><div class="stat-value">${totals.adoption_rate || 0}%</div><div class="stat-label">采纳率</div></div>
+            <div class="stat-card"><div class="stat-value">${totals.total_tokens || 0}</div><div class="stat-label">总Token数</div></div>
+        </div>`;
+        if (agents.length > 0) {
+            html += `<table class="stats-table"><thead><tr>
+                <th>角色</th><th>调用</th><th>成功率</th><th>采纳率</th><th>平均延迟</th><th>Token</th>
+            </tr></thead><tbody>`;
+            agents.forEach(a => {
+                html += `<tr><td>${this.escHtml(a.role)}</td><td>${a.call_count}</td><td>${a.success_rate}%</td><td>${a.adoption_rate}%</td><td>${a.avg_first_token_ms}ms</td><td>${a.total_tokens}</td></tr>`;
+            });
+            html += '</tbody></table>';
+        }
+        container.innerHTML = html;
+    },
+
+    // ==================== Import Dialog ====================
+    _importFileData: null,
+    _importFileType: null,
+    showImportDialog() {
+        document.getElementById('importModal').style.display = 'flex';
+        document.getElementById('importPreview').style.display = 'none';
+    },
+    closeImportDialog() {
+        document.getElementById('importModal').style.display = 'none';
+        this._importFileData = null;
+    },
+    async handleImportFile(event) {
+        const file = event.target.files[0];
+        if (!file) return;
+        const ext = file.name.split('.').pop().toLowerCase();
+        this._importFileType = ext;
+        document.getElementById('importBookTitle').value = file.name.replace(/\.[^.]+$/, '');
+
+        if (ext === 'json') {
+            const text = await file.text();
+            this._importFileData = text;
+            document.getElementById('importPreviewContent').textContent = `JSON 工作空间文件 (${(text.length / 1024).toFixed(1)} KB)`;
+        } else if (ext === 'md' || ext === 'txt') {
+            const text = await file.text();
+            this._importFileData = text;
+            const lines = text.split('\n').length;
+            document.getElementById('importPreviewContent').textContent = `${ext.toUpperCase()} 文件: ${lines} 行，${text.length} 字符`;
+        } else if (ext === 'docx') {
+            this._importFileData = file;
+            document.getElementById('importPreviewContent').textContent = `DOCX 文件: ${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
+        } else {
+            this.toast('不支持的文件格式', 'error');
+            return;
+        }
+        document.getElementById('importPreview').style.display = 'block';
+    },
+    async confirmImport() {
+        const title = document.getElementById('importBookTitle').value || '导入的书籍';
+        const type = this._importFileType;
+        if (!this._importFileData) { this.toast('无文件数据', 'error'); return; }
+
+        if (type === 'json') {
+            try {
+                const data = JSON.parse(this._importFileData);
+                const res = await this.api('/api/import', 'POST', data);
+                if (res && res.book_id) {
+                    this.toast('导入成功', 'success');
+                    await this.loadBooks();
+                    this.switchBook(res.book_id);
+                }
+            } catch (e) {
+                this.toast('JSON 解析失败: ' + e.message, 'error');
+            }
+        } else if (type === 'md' || type === 'txt') {
+            const res = await this.api('/api/import/file', 'POST', {
+                format: type === 'md' ? 'markdown' : 'txt',
+                content: this._importFileData,
+                title
+            });
+            if (res && res.book_id) {
+                this.toast('导入成功', 'success');
+                await this.loadBooks();
+                this.switchBook(res.book_id);
+            }
+        } else if (type === 'docx') {
+            const formData = new FormData();
+            formData.append('file', this._importFileData);
+            formData.append('title', title);
+            formData.append('format', 'docx');
+            const res = await fetch('/api/import/file', {
+                method: 'POST',
+                headers: this.authHeaders(),
+                body: formData
+            });
+            const data = await res.json();
+            if (data && data.book_id) {
+                this.toast('导入成功', 'success');
+                await this.loadBooks();
+                this.switchBook(data.book_id);
+            }
+        }
+        this.closeImportDialog();
+    },
+
+    // ==================== Memory Injection Log ====================
+    async openInjectionLog() {
+        if (!this.currentBookId) return;
+        document.getElementById('injectionLogModal').style.display = 'flex';
+        const params = this.currentNodeId ? `?node_id=${this.currentNodeId}` : '';
+        const res = await this.api(`/api/memory/injection-log/${this.currentBookId}${params}`, 'GET');
+        const container = document.getElementById('injectionLogContent');
+        if (!res || res.length === 0) {
+            container.innerHTML = '<p class="settings-hint">暂无注入记录</p>';
+            return;
+        }
+        const log = res[0];
+        const items = typeof log.injected_items === 'string' ? JSON.parse(log.injected_items) : (log.injected_items || []);
+        container.innerHTML = items.map(item => `
+            <div class="injection-item">
+                <span class="inject-tier t${item.tier || 0}">T${item.tier || 0}</span>
+                <div class="inject-content">
+                    <div class="inject-source">${this.escHtml(item.source || '')} (${item.type || ''})</div>
+                    <div class="inject-preview">${this.escHtml((item.content_preview || '').substring(0, 150))}</div>
+                    <div class="inject-reason">${this.escHtml(item.reason || '')}</div>
+                </div>
+            </div>
+        `).join('');
+    },
+    closeInjectionLog() {
+        document.getElementById('injectionLogModal').style.display = 'none';
+    },
+
+    // ==================== Embedding 索引 ====================
+    async buildEmbeddingIndex() {
+        if (!this.currentBookId) { this.toast('请先选择书籍', 'warning'); return; }
+        const status = document.getElementById('embeddingStatus');
+        status.textContent = '正在构建 Embedding 索引...';
+        const res = await this.api(`/api/embedding/${this.currentBookId}/build`, 'POST');
+        if (res) {
+            status.textContent = `Embedding 索引已构建: ${res.chunk_count || 0} chunks, 维度 ${res.dim || 0}`;
+            this.toast('Embedding 索引构建完成', 'success');
+        }
+    },
+    async loadEmbeddingStatus() {
+        if (!this.currentBookId) return;
+        const res = await this.api(`/api/embedding/${this.currentBookId}/status`);
+        const status = document.getElementById('embeddingStatus');
+        if (res && res.has_index && res.meta) {
+            status.textContent = `Embedding: ${res.meta.model_id} | ${res.meta.chunk_count} chunks | ${res.meta.last_built_at?.substring(0, 10) || ''}`;
+        } else {
+            status.textContent = 'Embedding 索引未构建';
+        }
+    },
+
+    // ==================== NER 实体识别 ====================
+    async runNER() {
+        if (!this.currentBookId || !this.currentNodeId) { this.toast('请先选择章节', 'warning'); return; }
+        const text = document.getElementById('editorArea').innerText;
+        this.toast('正在识别实体...', 'info');
+        const res = await this.api(`/api/ner/${this.currentBookId}/extract`, 'POST', {
+            node_id: this.currentNodeId, text
+        });
+        if (res && res.entities) {
+            this.renderNERResults(res.entities);
+            this.toast(`识别到 ${res.entities.length} 个实体`, 'success');
+        }
+    },
+    async runNERAll() {
+        if (!this.currentBookId) { this.toast('请先选择书籍', 'warning'); return; }
+        this.toast('正在全书识别...', 'info');
+        const res = await this.api(`/api/ner/${this.currentBookId}/extract-all`, 'POST');
+        if (res) {
+            this.toast(`全书识别完成: ${res.total} 个实体`, 'success');
+            this.loadNERResults();
+        }
+    },
+    async loadNERResults() {
+        if (!this.currentBookId) return;
+        const nodeId = this.currentNodeId || '';
+        const entities = await this.api(`/api/ner/${this.currentBookId}/entities?node_id=${nodeId}`);
+        if (entities) this.renderNERResults(entities);
+    },
+    renderNERResults(entities) {
+        const container = document.getElementById('nerEntityList');
+        if (!entities || entities.length === 0) {
+            container.innerHTML = '<p class="memory-helper-text">暂无识别结果</p>';
+            return;
+        }
+        const groups = {};
+        entities.forEach(e => {
+            const type = e.entity_type || 'other';
+            if (!groups[type]) groups[type] = [];
+            groups[type].push(e);
+        });
+        const typeLabels = { character: '人物', location: '地点', faction: '组织', item: '物品', concept: '概念', event: '事件' };
+        let html = '';
+        for (const [type, items] of Object.entries(groups)) {
+            html += `<div class="ner-entity-group"><h5><span class="entity-type-tag ${type}">${typeLabels[type] || type}</span> (${items.length})</h5>`;
+            items.slice(0, 20).forEach(e => {
+                const linked = e.linked_lorebook_id ? '<i class="fas fa-link" style="color:var(--success);font-size:10px;" title="已关联"></i>' : '';
+                const statusIcon = e.status === 'confirmed' ? '✓' : (e.status === 'dismissed' ? '✗' : '');
+                html += `<div class="ner-entity-item">
+                    <span class="entity-name">${this.escHtml(e.entity_text)} ${linked} ${statusIcon}</span>
+                    <span class="entity-conf">${Math.round((e.confidence || 0) * 100)}%</span>
+                    <span class="entity-actions">
+                        ${e.status !== 'confirmed' ? `<button class="btn btn-xs btn-ghost" onclick="App.confirmEntity('${e.id}')" title="确认"><i class="fas fa-check"></i></button>` : ''}
+                        ${e.status !== 'dismissed' ? `<button class="btn btn-xs btn-ghost" onclick="App.dismissEntity('${e.id}')" title="忽略"><i class="fas fa-times"></i></button>` : ''}
+                    </span>
+                </div>`;
+            });
+            html += '</div>';
+        }
+        container.innerHTML = html;
+    },
+    async confirmEntity(entityId) {
+        await this.api(`/api/ner/${this.currentBookId}/entities/${entityId}/confirm`, 'POST');
+        this.loadNERResults();
+    },
+    async dismissEntity(entityId) {
+        await this.api(`/api/ner/${this.currentBookId}/entities/${entityId}/dismiss`, 'POST');
+        this.loadNERResults();
+    },
+
+    // ==================== Knowledge Graph (vis-network) ====================
+    _visNetwork: null,
+    async extractKnowledge() {
+        if (!this.currentBookId || !this.currentNodeId) { this.toast('请先选择章节', 'warning'); return; }
+        const text = document.getElementById('editorArea').innerText;
+        this.toast('正在抽取图谱...', 'info');
+        const res = await this.api(`/api/knowledge/${this.currentBookId}/extract`, 'POST', {
+            node_id: this.currentNodeId, text
+        });
+        if (res) {
+            this.toast(`抽取完成: ${(res.new_edges || []).length} 关系, ${(res.new_events || []).length} 事件`, 'success');
+            this.loadKnowledgeGraph();
+        }
+    },
+    async extractKnowledgeAll() {
+        if (!this.currentBookId) { this.toast('请先选择书籍', 'warning'); return; }
+        this.toast('正在全书抽取图谱...', 'info');
+        const res = await this.api(`/api/knowledge/${this.currentBookId}/extract-all`, 'POST');
+        if (res) {
+            this.toast(`全书抽取完成: ${res.total?.relations || 0} 关系, ${res.total?.events || 0} 事件`, 'success');
+            this.loadKnowledgeGraph();
+        }
+    },
+    async loadKnowledgeGraph(center) {
+        if (!this.currentBookId) return;
+        const url = center
+            ? `/api/knowledge/${this.currentBookId}/graph?center=${encodeURIComponent(center)}&depth=2`
+            : `/api/knowledge/${this.currentBookId}/graph`;
+        const data = await this.api(url);
+        if (data && data.nodes) {
+            this.renderGraphVisualization(data);
+        }
+    },
+    renderGraphVisualization(data) {
+        const container = document.getElementById('knowledgeGraphVis');
+        const oldGraph = document.getElementById('entityGraph');
+        if (typeof vis !== 'undefined' && vis.Network) {
+            oldGraph.style.display = 'none';
+            container.style.display = 'block';
+            const typeColors = {
+                character: '#a78bfa', location: '#34d399', faction: '#fbbf24',
+                item: '#60a5fa', concept: '#f472b6', event: '#f87171'
+            };
+            const nodes = new vis.DataSet(data.nodes.map(n => ({
+                id: n.id, label: n.entity_name || n.label,
+                color: { background: typeColors[n.entity_type] || '#888', border: '#444' },
+                font: { color: '#e0e0e0', size: 12 },
+                shape: 'dot', size: Math.min(30, 10 + (n.mention_count || 1) * 2)
+            })));
+            const edges = new vis.DataSet(data.edges.map(e => ({
+                from: e.source_node_id || e.from, to: e.target_node_id || e.to,
+                label: e.relation_type || '', font: { color: '#888', size: 10 },
+                color: { color: (e.confidence || 0.5) < 0.5 ? '#666' : '#999' },
+                dashes: (e.status === 'auto' && (e.confidence || 0.5) < 0.5),
+                arrows: 'to'
+            })));
+            if (this._visNetwork) this._visNetwork.destroy();
+            this._visNetwork = new vis.Network(container, { nodes, edges }, {
+                physics: { stabilization: { iterations: 100 }, barnesHut: { gravitationalConstant: -3000 } },
+                interaction: { hover: true, tooltipDelay: 200 },
+                layout: { improvedLayout: true }
+            });
+            this._visNetwork.on('click', params => {
+                if (params.nodes.length > 0) {
+                    const nodeId = params.nodes[0];
+                    const node = data.nodes.find(n => n.id === nodeId);
+                    if (node) this.showGraphEntityDetail(node);
+                }
+            });
+        } else {
+            // Fallback: text rendering
+            oldGraph.innerHTML = data.nodes.map(n =>
+                `<div style="padding:4px;font-size:12px;">${n.entity_name} (${n.entity_type})</div>`
+            ).join('');
+        }
+    },
+    showGraphEntityDetail(node) {
+        const detail = document.getElementById('graphEntityDetail');
+        detail.style.display = 'block';
+        detail.innerHTML = `<h5>${this.escHtml(node.entity_name)} <span class="entity-type-tag ${node.entity_type}">${node.entity_type}</span></h5>
+            <div class="detail-row"><span class="detail-label">描述:</span>${this.escHtml(node.description || '无')}</div>
+            <div class="detail-row"><span class="detail-label">出现次数:</span>${node.mention_count || 0}</div>
+            <div class="detail-row"><span class="detail-label">首次出现:</span>${node.first_seen_node || '-'}</div>`;
+    },
+    switchGraphView(mode) {
+        const visContainer = document.getElementById('knowledgeGraphVis');
+        const tableContainer = document.getElementById('graphTableView');
+        const oldGraph = document.getElementById('entityGraph');
+        if (mode === 'visual') {
+            visContainer.style.display = 'block';
+            tableContainer.style.display = 'none';
+            oldGraph.style.display = 'none';
+            this.loadKnowledgeGraph();
+        } else {
+            visContainer.style.display = 'none';
+            tableContainer.style.display = 'block';
+            oldGraph.style.display = 'none';
+            this.loadGraphTable();
+        }
+    },
+    async loadGraphTable() {
+        if (!this.currentBookId) return;
+        const edges = await this.api(`/api/knowledge/${this.currentBookId}/graph`);
+        const container = document.getElementById('graphTableView');
+        if (!edges || !edges.edges || edges.edges.length === 0) {
+            container.innerHTML = '<p class="memory-helper-text">暂无关系数据</p>';
+            return;
+        }
+        let html = '<table><tr><th>源实体</th><th>关系</th><th>目标实体</th><th>置信度</th></tr>';
+        const nodeMap = {};
+        (edges.nodes || []).forEach(n => nodeMap[n.id] = n.entity_name || n.label);
+        edges.edges.forEach(e => {
+            html += `<tr>
+                <td>${this.escHtml(nodeMap[e.source_node_id || e.from] || '')}</td>
+                <td>${this.escHtml(e.relation_type || '')}</td>
+                <td>${this.escHtml(nodeMap[e.target_node_id || e.to] || '')}</td>
+                <td>${Math.round((e.confidence || 0) * 100)}%</td>
+            </tr>`;
+        });
+        container.innerHTML = html + '</table>';
+    },
+    filterGraph(query) {
+        if (!query.trim()) { this.loadKnowledgeGraph(); return; }
+        this.loadKnowledgeGraph(query.trim());
+    },
+
+    // ==================== Foreshadow Payoff ====================
+    async scanPayoffs() {
+        if (!this.currentBookId || !this.currentNodeId) { this.toast('请先选择章节', 'warning'); return; }
+        const text = document.getElementById('editorArea').innerText;
+        this.toast('正在扫描伏笔回收...', 'info');
+        const res = await this.api(`/api/foreshadow/${this.currentBookId}/scan-payoffs`, 'POST', {
+            node_id: this.currentNodeId, text
+        });
+        if (res && res.payoffs && res.payoffs.length > 0) {
+            this.showPayoffResults(res.payoffs);
+            this.toast(`检测到 ${res.payoffs.length} 个可能的伏笔回收`, 'success');
+        } else {
+            this.toast('未检测到伏笔回收', 'info');
+        }
+    },
+    showPayoffResults(payoffs) {
+        const section = document.getElementById('payoffResultsSection');
+        const container = document.getElementById('payoffResults');
+        section.style.display = 'block';
+        container.innerHTML = payoffs.map(p => `
+            <div class="payoff-card">
+                <div class="payoff-label">${this.escHtml(p.label || p.foreshadow_label || '')}</div>
+                <span class="payoff-type ${p.payoff_type || ''}">${p.payoff_type === 'resolved' ? '完全回收' :
+                    (p.payoff_type === 'partially_resolved' ? '部分回收' : (p.payoff_type === 'strengthened' ? '强化' : p.payoff_type || ''))}</span>
+                <span class="entity-conf" style="margin-left:8px;">${Math.round((p.confidence || 0) * 100)}%</span>
+                <div class="payoff-evidence">"${this.escHtml(p.evidence || p.evidence_quote || '')}"</div>
+                <div class="payoff-actions">
+                    <button class="btn btn-xs btn-primary" onclick="App.applyPayoff('${p.foreshadow_id || p.id}', '${p.payoff_type || 'resolved'}', '${this.escHtml(p.evidence || p.evidence_quote || '')}')">
+                        <i class="fas fa-check"></i> 确认
+                    </button>
+                    <button class="btn btn-xs btn-ghost" onclick="this.parentElement.parentElement.remove()">
+                        <i class="fas fa-times"></i> 忽略
+                    </button>
+                </div>
+            </div>
+        `).join('');
+    },
+    async applyPayoff(foreshadowId, payoffType, evidence) {
+        await this.api(`/api/foreshadow/${this.currentBookId}/apply-payoff`, 'POST', {
+            foreshadow_id: foreshadowId,
+            node_id: this.currentNodeId,
+            payoff_type: payoffType,
+            evidence: evidence
+        });
+        this.toast('伏笔回填已应用', 'success');
+        this.loadNarrativeAnalysis();
+    },
+
+    // ==================== Narrative Analysis ====================
+    async analyzeChapter() {
+        if (!this.currentBookId || !this.currentNodeId) { this.toast('请先选择章节', 'warning'); return; }
+        this.toast('正在分析章节叙事...', 'info');
+        const res = await this.api(`/api/narrative/${this.currentBookId}/analyze`, 'POST', { node_id: this.currentNodeId });
+        if (res && res.tension !== undefined) {
+            this.toast('章节分析完成', 'success');
+            this.loadNarrativeAnalysis();
+        }
+    },
+    async analyzeBook() {
+        if (!this.currentBookId) { this.toast('请先选择书籍', 'warning'); return; }
+        this.toast('正在全书分析...可能需要较长时间', 'info');
+        const res = await this.api(`/api/narrative/${this.currentBookId}/analyze-all`, 'POST');
+        if (res) {
+            this.toast(`全书分析完成: ${res.count} 章`, 'success');
+            this.loadNarrativeAnalysis();
+        }
+    },
+    async loadNarrativeAnalysis() {
+        if (!this.currentBookId) return;
+        // Load tension curve
+        const tension = await this.api(`/api/narrative/${this.currentBookId}/tension`);
+        if (tension && tension.length > 0) {
+            this.renderTensionChart(tension);
+        }
+        // Load emotion profile
+        const emotions = await this.api(`/api/narrative/${this.currentBookId}/emotions`);
+        if (emotions && emotions.length > 0) {
+            this.renderEmotionChart(emotions);
+        }
+        // Load character arcs
+        const arcs = await this.api(`/api/narrative/${this.currentBookId}/character-arcs`);
+        if (arcs && Object.keys(arcs).length > 0) {
+            this.renderCharacterArcs(arcs);
+        }
+        // Load pacing
+        const pacing = await this.api(`/api/narrative/${this.currentBookId}/pacing`);
+        if (pacing) this.renderPacingDiagnosis(pacing);
+        // Load completeness
+        const comp = await this.api(`/api/narrative/${this.currentBookId}/completeness`);
+        if (comp) this.renderArcCompleteness(comp);
+    },
+    renderTensionChart(data) {
+        const container = document.getElementById('tensionChart');
+        if (!data || data.length < 2) { container.innerHTML = '<p class="memory-helper-text">数据不足</p>'; return; }
+        const w = 500, h = 120, pad = 30;
+        const n = data.length;
+        const xStep = (w - pad * 2) / (n - 1);
+        let path = '';
+        let conflictPath = '';
+        data.forEach((d, i) => {
+            const x = pad + i * xStep;
+            const y = h - pad - (d.tension / 100) * (h - pad * 2);
+            const cy = h - pad - (d.conflict_level / 100) * (h - pad * 2);
+            path += (i === 0 ? 'M' : 'L') + `${x},${y}`;
+            conflictPath += (i === 0 ? 'M' : 'L') + `${x},${cy}`;
+        });
+        let dots = data.map((d, i) => {
+            const x = pad + i * xStep;
+            const y = h - pad - (d.tension / 100) * (h - pad * 2);
+            return `<circle cx="${x}" cy="${y}" r="3" fill="#a78bfa" class="chart-dot" onclick="App.toast('${d.chapter_title}: 张力${d.tension}', 'info')"><title>${d.chapter_title}: 张力${d.tension}</title></circle>`;
+        }).join('');
+        container.innerHTML = `<svg viewBox="0 0 ${w} ${h}">
+            <line x1="${pad}" y1="${h-pad}" x2="${w-pad}" y2="${h-pad}" stroke="#444" stroke-width="1"/>
+            <line x1="${pad}" y1="${pad}" x2="${pad}" y2="${h-pad}" stroke="#444" stroke-width="1"/>
+            <text x="${pad-5}" y="${pad+4}" fill="#888" font-size="10" text-anchor="end">100</text>
+            <text x="${pad-5}" y="${h-pad+4}" fill="#888" font-size="10" text-anchor="end">0</text>
+            <path d="${path}" fill="none" stroke="#a78bfa" stroke-width="2"/>
+            <path d="${conflictPath}" fill="none" stroke="#f87171" stroke-width="1" stroke-dasharray="4"/>
+            ${dots}
+            <text x="${w-pad}" y="${h-8}" fill="#888" font-size="9">章节</text>
+            <text x="${pad+4}" y="${pad-4}" fill="#a78bfa" font-size="9">张力</text>
+            <text x="${pad+40}" y="${pad-4}" fill="#f87171" font-size="9">冲突</text>
+        </svg>`;
+    },
+    renderEmotionChart(data) {
+        const container = document.getElementById('emotionChart');
+        if (!data || data.length < 2) { container.innerHTML = '<p class="memory-helper-text">数据不足</p>'; return; }
+        const emotionKeys = ['压抑', '紧张', '热血', '温柔', '悲伤', '释然'];
+        const colors = ['#6366f1', '#ef4444', '#f59e0b', '#10b981', '#3b82f6', '#8b5cf6'];
+        const w = 500, h = 120, pad = 30;
+        const n = data.length;
+        const xStep = (w - pad * 2) / (n - 1);
+        let paths = emotionKeys.map((key, ki) => {
+            let d = '';
+            data.forEach((ch, i) => {
+                const x = pad + i * xStep;
+                const val = (ch.emotions && ch.emotions[key]) || 0;
+                const y = h - pad - val * (h - pad * 2);
+                d += (i === 0 ? 'M' : 'L') + `${x},${y}`;
+            });
+            return `<path d="${d}" fill="none" stroke="${colors[ki]}" stroke-width="1.5" opacity="0.8"/>`;
+        }).join('');
+        let legend = emotionKeys.map((key, ki) =>
+            `<text x="${pad + ki * 50}" y="${h - 2}" fill="${colors[ki]}" font-size="9">${key}</text>`
+        ).join('');
+        container.innerHTML = `<svg viewBox="0 0 ${w} ${h}">
+            <line x1="${pad}" y1="${h-pad}" x2="${w-pad}" y2="${h-pad}" stroke="#444" stroke-width="1"/>
+            ${paths}${legend}
+        </svg>`;
+    },
+    renderCharacterArcs(arcs) {
+        const container = document.getElementById('characterArcChart');
+        const names = Object.keys(arcs).slice(0, 6);
+        if (names.length === 0) { container.innerHTML = '<p class="memory-helper-text">暂无角色数据</p>'; return; }
+        const colors = ['#a78bfa', '#34d399', '#fbbf24', '#60a5fa', '#f472b6', '#f87171'];
+        const w = 500, laneH = 24, pad = 30;
+        const h = pad * 2 + names.length * laneH;
+        let svg = `<svg viewBox="0 0 ${w} ${h}">`;
+        names.forEach((name, ni) => {
+            const y = pad + ni * laneH;
+            const pts = arcs[name];
+            svg += `<text x="4" y="${y + 14}" fill="${colors[ni]}" font-size="10">${name}</text>`;
+            svg += `<line x1="${pad + 50}" y1="${y + laneH}" x2="${w - pad}" y2="${y + laneH}" stroke="#333" stroke-width="0.5"/>`;
+            if (pts && pts.length > 0) {
+                const maxCh = Math.max(...pts.map(p => p.chapter_index), 1);
+                pts.forEach(p => {
+                    const x = pad + 50 + (p.chapter_index / maxCh) * (w - pad * 2 - 50);
+                    const barH = (p.presence || 0) / 100 * laneH * 0.8;
+                    svg += `<rect x="${x-2}" y="${y + laneH - barH}" width="4" height="${barH}" fill="${colors[ni]}" opacity="0.7">
+                        <title>${p.chapter_title}: 出场${p.presence}%</title></rect>`;
+                });
+            }
+        });
+        container.innerHTML = svg + '</svg>';
+    },
+    renderPacingDiagnosis(pacing) {
+        const container = document.getElementById('pacingDiagnosis');
+        if (!pacing || !pacing.issues || pacing.issues.length === 0) {
+            const overall = pacing?.overall === 'too_flat' ? '整体偏平' : (pacing?.overall === 'too_intense' ? '整体偏紧' : '节奏均衡');
+            container.innerHTML = `<p class="memory-helper-text">平均张力: ${pacing?.avg_tension || '-'} | ${overall}</p>`;
+            return;
+        }
+        container.innerHTML = pacing.issues.map(issue => `
+            <div class="pacing-issue severity-${issue.severity}">
+                <div class="issue-message">${this.escHtml(issue.message)}</div>
+                <div class="issue-suggestion">${this.escHtml(issue.suggestion || '')}</div>
+            </div>
+        `).join('');
+    },
+    renderArcCompleteness(comp) {
+        const container = document.getElementById('arcCompleteness');
+        if (!comp || comp.score === undefined) { container.innerHTML = '<p class="memory-helper-text">数据不足</p>'; return; }
+        container.innerHTML = `
+            <div class="arc-score">${comp.score}/100</div>
+            <div class="arc-structure">${this.escHtml(comp.structure || '')}</div>
+            <div style="margin-top:8px;">
+                <div class="arc-check"><i class="fas fa-${comp.has_setup ? 'check' : 'times'}"></i> 开端铺垫</div>
+                <div class="arc-check"><i class="fas fa-${comp.has_rising ? 'check' : 'times'}"></i> 上升发展</div>
+                <div class="arc-check"><i class="fas fa-${comp.has_climax ? 'check' : 'times'}"></i> 高潮 ${comp.climax_chapter ? '(' + this.escHtml(comp.climax_chapter) + ')' : ''}</div>
+                <div class="arc-check"><i class="fas fa-${comp.has_resolution ? 'check' : 'times'}"></i> 收束结局</div>
+            </div>
+        `;
     }
 };
 

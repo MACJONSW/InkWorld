@@ -14,6 +14,7 @@ venv/
 .env
 .env.*
 .encryption_key
+.jwt_secret
 *.pem
 *.key
 
