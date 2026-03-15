@@ -1,96 +1,189 @@
 # 墨境 · AI 长篇小说写作平台
 
-墨境是一个面向长篇小说创作的 AI 辅助写作工作台。它将目录管理、世界观设定、章节写作、多智能体协作、三层记忆、伏笔追踪、角色心理分析、世界状态校验和工作区导入导出整合在同一个 Web 界面里，适合用于中长篇网文、类型小说和复杂多线叙事项目。
+墨境是一个面向长篇小说创作的 AI 写作工作台。它把目录树、正文编辑器、多智能体协作、三层记忆、世界状态、时间线、伏笔追踪、角色心理、知识图谱、快照/回收站、工作流、全书体检和导入导出整合在一个 Flask 单体应用里。
 
-本仓库当前版本已经支持“人物历史提醒”能力：当你在新章节中提到某个角色时，系统会根据该角色的 Lorebook 设定、历史事件记录、未回收伏笔、角色心理和世界状态自动生成提醒，并在 AI 写作提示词和右侧记忆面板中同时展示，帮助你避免角色崩坏、遗忘伏笔或时间线错乱。
+这份 README 的目标不是只告诉你“怎么跑起来”，而是把下面几件事都讲清楚：
 
-如果你需要查看底层实现细节、运行时架构和各个智能体的执行流程，请直接阅读 [TECHNICAL.md](TECHNICAL.md)。
+1. 这个仓库当前的真实技术架构是什么。
+2. 你需要准备哪些外部依赖，才能把“所有功能”都跑起来。
+3. 应用本身应该怎么部署。
+4. Embedding 模型应该怎么部署、怎么接进系统。
+5. 当前代码里有哪些会直接影响部署方案的约束。
 
-如果你准备做二次开发，例如新增智能体、接入新的记忆模块或扩展模型路由，请直接阅读 [EXTENDING.md](EXTENDING.md)。
+如果你要看更细的实现细节，请继续阅读：
 
-## 核心能力
+- [TECHNICAL.md](TECHNICAL.md)：内部技术实现、模块调用链、数据流
+- [FEATURES.md](FEATURES.md)：功能盘点与数据库/API清单
+- [EXTENDING.md](EXTENDING.md)：二次开发与新增 Agent/记忆模块
 
-- 多智能体写作
-  - 架构师：生成整本书或卷章大纲
-  - 节拍器：把章节拆成场景节拍
-  - 执笔者：根据前文、节拍和上下文流式写作
-  - 验证者：检查 OOC、时间线和设定一致性
-  - 润色器：根据风格要求润色文本
-  - 摘要器：生成章节摘要并沉淀长期记忆
-  - 续写、自动补全、联想、Plan 模式、幻觉检测等扩展 Agent
-- 三层记忆系统
-  - Tier 1：当前章节工作记忆
-  - Tier 2：滚动章节摘要
-  - Tier 3：向量检索记忆（TF-IDF，支持 FAISS）
-- 世界观与角色资料管理
-  - Lorebook 支持角色、地点、物品、派系、法则
-  - 实体关系图谱
-  - 角色心理档案
-  - 世界状态追踪
-- 叙事辅助
-  - 伏笔检测与伏笔池管理
-  - 潜台词分析
-  - 情绪张力曲线诊断
-  - 幻觉检测与自动重试
-- 写作工程能力
-  - 目录树：书 > 卷 > 章 > 场景
-  - 章节内容自动保存
-  - 版本分支与 Diff
-  - Markdown / TXT / EPUB / JSON 工作区导出
-  - JSON 工作区导入
-- 新增：人物历史提醒
-  - 自动识别当前章节提及的人物
-  - 聚合该人物的性格、驱动力、近期事件、未回收伏笔和当前状态
-  - 提醒既会出现在右侧记忆面板，也会自动注入执笔、续写、自动补全和行内编辑的提示词
-  - 支持手工添加、编辑、删除人物历史记录
-  - 支持单章节刷新和全书回填
+## 1. 当前版本的真实技术架构
 
-## 界面概览
-
-应用是一个三栏写作工作台：
-
-- 左栏：目录树、Lorebook、实体图谱
-- 中栏：正文编辑器、Slash 指令、Ghost Text 自动补全、版本和 Diff
-- 右栏：智能体工作台、记忆面板、章节摘要、向量检索、人物提醒
-
-## 技术栈
-
-- 后端：Flask、Flask-CORS、Flask-SocketIO
-- 数据库：SQLite
-- 模型接入：OpenAI 兼容接口，支持自定义 Base URL
-- 向量/检索：NumPy、scikit-learn，可选 FAISS
-- 前端：原生 HTML / CSS / JavaScript
-- 导出：Markdown、TXT、EPUB、JSON
-
-## 项目结构
+### 1.1 总体结构
 
 ```text
-agents.py           多智能体编排与提示词构建
-app.py              Flask API 入口、认证、导入导出、诊断接口
-database.py         SQLite schema 与持久化访问层
-memory_engine.py    三层记忆、动态注入、人物提醒聚合
-export_engine.py    Markdown/TXT/EPUB/JSON 导入导出
-requirements.txt    Python 依赖
-static/
-  css/style.css     前端样式
-  js/app.js         前端应用逻辑
-templates/
-  index.html        主界面模板
-novel_platform.db   运行后生成的 SQLite 数据库
-.encryption_key     运行后生成的本地加密密钥
+Browser
+  ├─ templates/index.html
+  ├─ static/js/app.js
+  └─ static/css/style.css
+        │
+        │ HTTP / SSE
+        ▼
+Flask app (app.py)
+  ├─ JWT 认证 / 资源权限校验
+  ├─ 模型配置 / 路由 / 生成参数
+  ├─ 书籍 / 节点 / 版本 / 快照 / 回收站
+  ├─ Agent API / SSE 流式生成
+  ├─ 记忆 / Embedding / NER / 图谱 / 时间线
+  ├─ 一致性扫描 / 工作流 / 任务中心 / 统计
+  └─ 导入 / 导出
+        │
+        ├─ AgentOrchestrator (agents.py)
+        ├─ MemoryEngine (memory_engine.py)
+        ├─ EmbeddingEngine (embedding_engine.py)
+        ├─ NEREngine / DisambiguationEngine
+        ├─ KnowledgeGraphEngine / ForeshadowEngine / NarrativeEngine
+        ├─ RuleEngine / TimelineEngine / SnapshotEngine
+        ├─ SearchEngine / WorkflowEngine / ConsistencyEngine / StatsEngine
+        ├─ JobEngine
+        └─ ExportEngine
+                │
+                ▼
+          SQLite (novel_platform.db)
+          + .encryption_key
+          + .jwt_secret
 ```
 
-## 快速开始
+### 1.2 当前部署形态的关键事实
 
-### 1. 环境要求
+这几个事实会直接影响你的部署方式：
 
-建议使用：
+- 这是一个单体 Flask 应用，没有拆成前后端分离、没有 Redis、没有 Celery、没有消息队列。
+- 异步任务中心由 `job_engine.py` 在当前进程里起后台线程完成，不是外部 worker。
+- Embedding 索引和 TF-IDF / FAISS 索引有一部分驻留在应用进程内存里。
+- 数据库存储是单文件 SQLite：`novel_platform.db`。
+- 关键密钥文件是本地文件：`.encryption_key` 和 `.jwt_secret`。
+- 核心流式生成靠 SSE，不是 WebSocket；`Flask-SocketIO` 目前主要是预留能力。
 
-- Python 3.10 或更高版本
-- Linux / macOS / Windows
-- 可访问的 LLM API（OpenAI 兼容接口即可）
+这意味着当前版本**最适合单机单进程部署**。如果你上多 worker、多副本或多节点，需要自己处理：
 
-### 2. 安装依赖
+- SQLite 并发与锁竞争
+- 进程内后台任务状态不共享
+- 进程内 Embedding / FAISS 缓存不共享
+- 密钥文件分发与一致性
+
+## 2. 功能与外部依赖矩阵
+
+下面这张表是“所有功能要跑起来到底需要什么”的总表。
+
+| 功能 | 必需依赖 | 可选/增强依赖 | 说明 |
+| --- | --- | --- | --- |
+| 登录、书籍、目录树、编辑器、自动保存、版本、快照、回收站 | Python + SQLite | 无 | 这些不依赖大模型 |
+| 架构师 / 节拍器 / 执笔者 / 续写 / Plan 模式 / 润色 / 自动补全 | OpenAI 兼容聊天模型 | 分角色多模型 | 由 `agents.py` 调用 `chat.completions` |
+| 验证者 / 幻觉检测 / 世界状态提取 / NER / 关系抽取 / 事件抽取 / 潜台词 / 心理分析 / 叙事分析 | OpenAI 兼容聊天模型 | 单独 validator / hallucination 模型 | 这些高级能力大多复用 `validator` 或 `hallucination` 路由 |
+| Tier 1 / Tier 2 记忆 | 数据库内正文与摘要 | 无 | 不依赖 embedding |
+| Tier 3 检索（基础版） | `scikit-learn` TF-IDF | `rank-bm25`、`jieba` | 这些依赖已在 `requirements.txt` |
+| Tier 3 检索（语义增强） | OpenAI 兼容 `/v1/embeddings` 服务 | `faiss-cpu` | `embedding_engine.py` 会调用 embedding API |
+| Embedding 检索加速 | 无 | `faiss-cpu` | 未安装时退回 NumPy 余弦相似度 |
+| 实体图谱可视化 | 浏览器可访问 `vis-network` 资源 | 本地自托管静态资源 | 当前模板默认走 CDN |
+| 字体/图标 | 浏览器可访问 Google Fonts / Font Awesome | 本地自托管静态资源 | 内网或离线环境要自己落地 |
+| EPUB 导出 | `ebooklib` | 无 | 已在 `requirements.txt` |
+| DOCX 导入 | `python-docx` | 无 | 已在 `requirements.txt` |
+
+## 3. 代码里对部署最关键的约束
+
+### 3.1 模型 Base URL 不能直接填本地地址
+
+`app.py::_validate_base_url()` 会拒绝下面这些主机名：
+
+- `localhost`
+- `127.0.0.1`
+- `0.0.0.0`
+- `10.*`
+- `192.168.*`
+- `172.16.*` 到 `172.31.*`
+
+这意味着：
+
+- 你不能在设置页里直接填 `http://127.0.0.1:11434/v1`
+- 你不能直接填 `http://192.168.1.50:8000/v1`
+
+如果你要部署本地或内网模型服务，正确方式是：
+
+1. 先把模型服务跑在本机或内网。
+2. 用 Nginx / Caddy / Traefik 反代到一个域名，例如 `https://llm.example.com/v1`。
+3. 在墨境里填这个域名。
+
+### 3.2 `POST /api/routing` 会覆盖整张路由表
+
+`database.py::set_routing()` 的逻辑是先删当前用户所有路由，再重新写入。  
+因此如果你手工调用 `POST /api/routing` 去补 `embedding` 路由，**必须把已有路由一起带上**，不能只发一条：
+
+```json
+{"embedding":"..."}
+```
+
+否则你会把原来的 `planner`、`drafter`、`validator` 等全部清空。
+
+### 3.3 设置页当前没有暴露 `embedding` 路由
+
+前端设置页的“任务路由”只覆盖了这些角色：
+
+- `planner`
+- `beat_generator`
+- `drafter`
+- `validator`
+- `polisher`
+- `summarizer`
+- `autocomplete`
+- `association`
+- `plan_and_solve`
+- `hallucination`
+
+但是 `embedding_engine.py` 实际查的是：
+
+- `embedding`
+
+也就是说，**Embedding 路由目前要用 API 手工补**，后面 README 会给命令示例。
+
+### 3.4 当前版本建议单进程部署
+
+推荐原因：
+
+- SQLite 是单文件数据库。
+- `JobEngine` 使用进程内线程跑后台任务。
+- Embedding / FAISS / BM25 缓存驻留在当前进程。
+- 没有 Redis / MQ / 外部任务调度器。
+
+如果你直接上多进程 Gunicorn、多副本容器，系统不会立刻崩，但会出现：
+
+- 任务状态分散
+- 检索缓存重复构建
+- 部分请求打到不同 worker 时感知不一致
+
+## 4. 环境要求
+
+建议环境：
+
+- Python `3.10+`
+- Linux（推荐）；macOS / Windows 也能本地运行
+- 一台能访问外部模型服务的机器，或你自己的 OpenAI 兼容模型服务
+- 磁盘可写目录，用于：
+  - `novel_platform.db`
+  - `.encryption_key`
+  - `.jwt_secret`
+- 浏览器可访问这些静态资源域名，或者你自己把它们改成本地文件：
+  - `fonts.googleapis.com`
+  - `fonts.gstatic.com`
+  - `cdnjs.cloudflare.com`
+  - `unpkg.com`
+
+可选增强：
+
+- `faiss-cpu`：更快的向量检索
+
+## 5. 本地启动
+
+### 5.1 安装依赖
 
 ```bash
 python -m venv .venv
@@ -106,17 +199,39 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-### 3. 设置环境变量
-
-最少建议配置一个安全的应用密钥：
+如果你要启用 FAISS：
 
 ```bash
-export APP_SECRET_KEY="replace-this-with-a-random-secret"
+pip install faiss-cpu
 ```
 
-如果不设置，应用会使用开发默认值，仅适合本地试验。
+### 5.2 配置环境变量
 
-### 4. 启动服务
+最少建议设置下面三个：
+
+```bash
+export APP_SECRET_KEY="$(python - <<'PY'
+import secrets
+print(secrets.token_hex(32))
+PY
+)"
+export ALLOWED_ORIGINS="http://localhost:5000"
+export FLASK_DEBUG=0
+```
+
+说明：
+
+- `APP_SECRET_KEY`
+  - JWT 签名密钥
+  - 如果不设置，应用会自动生成 `.jwt_secret`
+- `ALLOWED_ORIGINS`
+  - CORS 允许源
+  - 默认值是 `http://localhost:5000`
+- `FLASK_DEBUG`
+  - `1` 表示 debug 模式
+  - 生产环境请保持 `0`
+
+### 5.3 启动应用
 
 ```bash
 python app.py
@@ -124,338 +239,514 @@ python app.py
 
 默认监听：
 
-- http://127.0.0.1:5000
-- http://0.0.0.0:5000
+- `http://127.0.0.1:5000`
+- `http://0.0.0.0:5000`
+
+### 5.4 首次进入系统后的最小步骤
+
+1. 打开浏览器访问 `http://127.0.0.1:5000`
+2. 注册用户
+3. 进入“设置中心”
+4. 添加至少一个聊天模型
+5. 配置任务路由
+6. 创建书籍并开始使用
+
+## 6. 生产部署建议：单机 + systemd + Nginx
+
+当前代码最稳妥的生产方式是：
 
-### 5. 首次使用
+- 1 个应用进程
+- 1 个 SQLite 文件
+- 1 份密钥文件
+- Nginx 反向代理
 
-1. 打开浏览器访问应用。
-2. 注册或登录。
-3. 进入“设置中心”，添加模型配置。
-4. 配置任务路由，把不同角色分配到对应模型。
-5. 创建一本书并开始写作。
+### 6.1 目录示例
 
-## 模型配置说明
+```text
+/srv/inkworld/
+  app.py
+  database.py
+  agents.py
+  ...
+  static/
+  templates/
+  .venv/
+  novel_platform.db
+  .encryption_key
+  .jwt_secret
+```
 
-应用不在 `.env` 中硬编码模型配置，而是采用“用户登录后在 UI 中管理模型”的方式。
+### 6.2 systemd 服务示例
 
-在“设置中心”中，你可以配置：
+创建 `/etc/systemd/system/inkworld.service`：
 
-- 名称
-- 提供商
-- Base URL
-- API Key
-- 模型标识
-- 最大上下文
+```ini
+[Unit]
+Description=InkWorld Flask App
+After=network.target
 
-然后再把模型分配给不同角色，例如：
+[Service]
+User=www-data
+Group=www-data
+WorkingDirectory=/srv/inkworld
+Environment=APP_SECRET_KEY=replace-with-a-long-random-secret
+Environment=ALLOWED_ORIGINS=https://novel.example.com
+Environment=FLASK_DEBUG=0
+ExecStart=/srv/inkworld/.venv/bin/python /srv/inkworld/app.py
+Restart=always
+RestartSec=5
 
-- `planner`
-- `beat_generator`
-- `drafter`
-- `validator`
-- `polisher`
-- `summarizer`
-- `autocomplete`
-- `association`
-- `plan_and_solve`
-- `hallucination`
+[Install]
+WantedBy=multi-user.target
+```
 
-如果某个角色没有显式路由，系统会回退到当前用户的第一个模型配置。
+启用服务：
 
-## 主要写作流程
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now inkworld
+sudo systemctl status inkworld
+```
 
-### 从灵感到正文
+### 6.3 Nginx 反向代理示例
 
-1. 创建书籍。
-2. 用“架构师”生成大纲。
-3. 用“节拍器”拆出场景节拍。
-4. 在目录树中建立卷 / 章 / 场景结构。
-5. 在编辑器中写正文，或用“执笔者”“续写”“深度生成”协助生成内容。
-6. 用“验证者”与“幻觉检测”检查一致性。
-7. 用“摘要器”生成章节摘要并沉淀记忆。
-8. 用“伏笔检测”“心理分析”“潜台词分析”等工具优化叙事质量。
+创建站点配置：
 
-### 角色持续写作流程
+```nginx
+server {
+    listen 80;
+    server_name novel.example.com;
+    client_max_body_size 50m;
 
-推荐在每章完成后做两件事：
+    location / {
+        proxy_pass http://127.0.0.1:5000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
 
-1. 生成章节摘要。
-2. 刷新当前章节人物历史。
+        proxy_read_timeout 3600;
+        proxy_send_timeout 3600;
+        proxy_buffering off;
+    }
+}
+```
 
-这样下一章提到角色时，系统就能更稳定地提醒：
+注意：
 
-- 这个人物是什么性格
-- 之前做过什么关键行动
-- 现在处于什么状态
-- 还有哪些伏笔没有回收
+- `proxy_buffering off` 对 SSE 很重要。
+- `client_max_body_size 50m` 要和应用的 `MAX_CONTENT_LENGTH = 50MB` 对齐。
 
-## 人物历史提醒机制
+### 6.4 为什么这里不推荐直接多 worker
 
-这是本仓库当前版本最重要的新增能力之一。
+因为当前版本不是“无状态 API + 外部 worker + 外部缓存”的架构，而是：
 
-### 提醒数据来源
+- 应用进程里有线程任务
+- 应用进程里有 Embedding/FAISS 缓存
+- 数据库是 SQLite
 
-人物提醒不是单一表，而是以下信息的聚合结果：
+所以当前 README 明确推荐：**单机、单应用实例**。
 
-- Lorebook 角色条目：角色基础设定、性格、背景、关键词
-- 角色心理档案：驱动力、恐惧、防御机制、核心矛盾
-- 人物历史档案：角色在各章节的关键事件记录，可自动生成也可手工维护
-- 伏笔池：与该角色相关、尚未回收的伏笔
-- 世界状态：位置、关系、身体状态、物品状态等
+## 7. 模型接入与任务路由
 
-### 如何触发提醒
+### 7.1 应用支持什么模型接口
 
-系统会在这些场景里自动识别当前文本提到的人物，并构建提醒：
+这个仓库的模型调用方式很统一：
 
-- 切换到某个章节时
-- 编辑器输入时的侧边刷新
-- 自动补全前
-- 执笔者生成前
-- 智能续写前
-- 行内改写 / 扩写 / 精简等指令执行前
-- 幻觉检测构建 premise 时
+- 聊天模型：OpenAI 兼容 `chat.completions`
+- Embedding 模型：OpenAI 兼容 `embeddings`
 
-### 人物历史如何生成
+也就是说，只要你的模型服务满足：
 
-人物历史支持两种来源：
+- `base_url`
+- `api_key`
+- `model_id`
+- OpenAI 兼容 JSON 协议
 
-- 自动生成
-  - 通过章节内容和章节摘要识别本章出现的角色
-  - 为每个角色写入一条与章节关联的事件记录
-- 手工维护
-  - 在右侧“人物提醒”面板中添加、编辑、删除人物记录
-  - 适合补充重要设定、角色弧线、暗线、特殊伏笔
+就能被接进来。
 
-### 何时回填
+### 7.2 最低可用模型配置
 
-对于已经写了很多章节的旧书，建议点一次：
+最小可用方案：
 
-- “回填全书”
+- 1 个通用聊天模型
 
-它会遍历已有章节内容，为书中角色补齐基础事件记录。
+这时所有角色都会回退到这一个模型上运行，系统能工作，但体验一般。
 
-### 第一版实现边界
+更稳妥的方案：
 
-当前版本的人物识别主要依赖：
+| 路由角色 | 推荐用途 |
+| --- | --- |
+| `planner` | 整书/章节规划、冲突设计、伏笔扫描 |
+| `beat_generator` | 节拍拆分 |
+| `drafter` | 正文生成、行内编辑、续写 |
+| `validator` | 校验、NER、关系抽取、事件抽取、潜台词、心理、世界状态、叙事分析 |
+| `polisher` | 润色 |
+| `summarizer` | 章节摘要 |
+| `autocomplete` | Ghost Text 自动补全 |
+| `association` | 头脑风暴 |
+| `plan_and_solve` | 分阶段写作 |
+| `hallucination` | 幻觉检测 |
+| `embedding` | 向量语义检索 |
 
-- Lorebook 的角色名
-- Lorebook 的关键词字段
+### 7.3 高级功能实际复用哪些路由
 
-如果一个角色有别名、称号、绰号，建议把这些变体写进 `keywords`，这样提醒命中会更稳定。
+这点很重要，因为前端看起来有很多“功能名”，但后端不一定每个都单独占一条模型路由。
 
-## 三层记忆系统
+| 功能 | 实际调用的角色路由 |
+| --- | --- |
+| 冲突设计 | `planner` |
+| 伏笔检测 | `validator` |
+| 伏笔回收扫描 | `planner` |
+| 潜台词分析 | `validator` |
+| 心理分析 | `validator` |
+| 世界状态提取 / 校验 | `validator` 或 `hallucination` |
+| NER / 共指 / 关系 / 事件抽取 | `validator` |
+| 叙事分析 | `validator` |
+| 幻觉检测 | `hallucination` |
 
-### Tier 1：工作记忆
+如果你只配了基础的 `planner / drafter / validator / hallucination`，大多数高级功能都能工作。
 
-- 从当前编辑章节截取最近一段正文
-- 作为当前写作最直接的局部上下文
+## 8. Embedding 模型部署
 
-### Tier 2：滚动摘要
+### 8.1 代码到底要求什么
 
-- 每章摘要写入数据库
-- 便于长线写作时快速回顾前情
+`embedding_engine.py` 的要求很明确：
 
-### Tier 3：向量检索
+- 查找当前用户的 `embedding` 路由
+- 用 OpenAI Python SDK 初始化客户端
+- 调用 `client.embeddings.create(model=model_id, input=batch)`
 
-- 收集 Lorebook、章节摘要和正文切片
-- 使用 TF-IDF 建立索引
-- 如果环境安装了 FAISS，会自动使用 FAISS 加速检索
+所以你的 Embedding 服务必须满足：
 
-### 动态注入
+1. 有 OpenAI 兼容的 `/v1/embeddings`
+2. 返回标准 embedding 向量数组
+3. Base URL 能通过应用的 SSRF 校验
 
-写作时系统会根据当前文本匹配 Lorebook 条目，把相关设定动态注入提示词，而不是把全部设定一次性塞进上下文。
+### 8.2 如果不部署 Embedding，会发生什么
 
-## 伏笔、心理与世界状态
+不会导致整站不可用。
 
-### 伏笔系统
+不部署 Embedding 时：
 
-支持：
+- Tier 1 / Tier 2 记忆照常工作
+- `memory_engine.py` 仍会用 TF-IDF + BM25 + 可选 FAISS 跑检索
+- 但 `embedding_engine.py` 的语义检索、Embedding 索引构建、语义 chunk recall 不可用
 
-- 自动检测伏笔
-- 保存到伏笔池
-- 标记已回收 / 未回收
-- 基于当前章节扫描哪些伏笔适合 payoff
+换句话说：
 
-### 角色心理档案
+- **Embedding 是增强项，不是整站硬依赖**
 
-支持为角色记录：
+### 8.3 方案 A：直接接云端 Embedding API
 
-- 驱动力
-- 恐惧
-- 防御机制
-- 潜台词风格
-- 核心矛盾
+如果你已经有一个兼容 OpenAI Embeddings 的远程服务，这是最简单的做法：
 
-### 世界状态
+1. 在“设置中心 -> 模型管理”里新增一条模型
+2. `base_url` 填服务地址，例如 `https://api.example.com/v1`
+3. `model_id` 填你的 embedding 模型名
+4. 后面再把它绑定到 `embedding` 路由
 
-系统可记录和校验：
+优点：
 
-- 时间
-- 位置
-- 物品状态
-- 身体状态
-- 关系变化
+- 不需要单独运维本地模型
+- 不会遇到 `localhost` 被阻止的问题
 
-这些内容也会参与幻觉检测和人物提醒聚合。
+### 8.4 方案 B：自建 vLLM Embedding 服务
 
-## 导入导出
+如果你要自己部署 Embedding 模型，并希望走 OpenAI 兼容协议，vLLM 是一个适配度较高的选择。官方文档提供了 Embedding API 和 OpenAI 兼容服务说明：
 
-支持以下格式：
+- Embeddings API: `https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#embeddings-api`
+- Pooling / Embedding runner: `https://docs.vllm.ai/en/latest/models/supported_models.html`
 
-- Markdown
-- TXT
-- EPUB
-- JSON 工作区
+部署思路：
 
-其中：
+1. 在模型机上安装 vLLM
+2. 使用支持 embedding / pooling 的模型启动服务
+3. 以 OpenAI 兼容方式暴露 `/v1`
+4. 再通过域名反代到外部可访问地址，例如 `https://embed.example.com/v1`
 
-- Markdown / TXT / EPUB 用于导出最终内容阅读或排版
-- JSON 工作区用于完整迁移项目数据
+示意命令（具体参数以官方文档为准）：
 
-JSON 工作区导出内容包括：
+```bash
+vllm serve <your-embedding-model> --runner pooling --host 127.0.0.1 --port 8001
+```
 
-- 书籍元数据
-- 文档树与正文内容
-- 版本分支
-- Lorebook
-- 实体图谱
-- 章节摘要
-- 大纲
-- 伏笔池
-- 世界状态
-- 角色心理档案
-- 人物历史档案
+然后再用 Nginx 暴露：
 
-## 主要 API 概览
+```nginx
+server {
+    listen 80;
+    server_name embed.example.com;
 
-这里只列最常用的接口分组。
+    location /v1/ {
+        proxy_pass http://127.0.0.1:8001/v1/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
 
-### 认证
+### 8.5 方案 C：自建 Ollama Embedding 服务
 
-- `POST /api/auth/register`
-- `POST /api/auth/login`
-- `GET /api/auth/me`
+如果你已经在用 Ollama，也可以接。关键点是：**墨境需要的是 Ollama 的 OpenAI 兼容层 `/v1/embeddings`，不是原生 `/api/embed`。**
 
-### 书籍与目录
+官方参考：
 
-- `GET /api/books`
-- `POST /api/books`
-- `GET /api/books/<book_id>/tree`
-- `POST /api/nodes`
-- `GET /api/nodes/<node_id>/content`
-- `PUT /api/nodes/<node_id>/content`
+- Embeddings: `https://docs.ollama.com/capabilities/embeddings`
+- OpenAI compatibility: `https://docs.ollama.com/openai`
+- 官方 Embedding 模型介绍：`https://ollama.com/blog/embedding-models`
 
-### Lorebook / 图谱
+部署思路：
 
-- `GET /api/lorebook/<book_id>`
-- `POST /api/lorebook/<book_id>`
-- `GET /api/entity-graph/<book_id>`
-- `POST /api/entity-graph/<book_id>`
+1. 安装并启动 Ollama
+2. 拉取一个 embedding 模型
+3. 使用其 OpenAI 兼容接口 `/v1`
+4. 用域名反代后再填进墨境
 
-### 记忆与检索
+示意：
 
-- `GET /api/memory/summary/<book_id>`
-- `POST /api/memory/vectorize/<book_id>`
-- `POST /api/memory/retrieve`
-- `POST /api/memory/inject`
-- `GET /api/memory/status/<book_id>/<node_id>`
-- `POST /api/character-reminders`
+```bash
+ollama serve
+ollama pull embeddinggemma
+```
 
-### 人物历史
+如果你把 Ollama 跑在本机 `127.0.0.1:11434`，不要直接把这个地址填进墨境；要先反代：
 
-- `GET /api/character-history/<book_id>`
-- `POST /api/character-history/<book_id>`
-- `POST /api/character-history/<book_id>/refresh`
-- `PUT /api/character-history/<book_id>/<history_id>`
-- `DELETE /api/character-history/<book_id>/<history_id>`
+```nginx
+server {
+    listen 80;
+    server_name ollama-api.example.com;
 
-### 多智能体
+    location /v1/ {
+        proxy_pass http://127.0.0.1:11434/v1/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
 
-- `POST /api/agent/plan`
-- `POST /api/agent/beats`
-- `POST /api/agent/draft`
-- `POST /api/agent/draft-guarded`
-- `POST /api/agent/continue`
-- `POST /api/agent/continue-fast`
-- `POST /api/agent/autocomplete`
-- `POST /api/agent/validate`
-- `POST /api/agent/polish`
-- `POST /api/agent/summarize`
-- `POST /api/inline-command`
-- `POST /api/agent/plan-and-solve`
-- `POST /api/agent/hallucination-check`
+然后在墨境模型管理里填：
 
-### 伏笔 / 心理 / 世界状态
+- `base_url`: `https://ollama-api.example.com/v1`
+- `api_key`: 任意非空占位值即可，例如 `ollama`
+- `model_id`: 你拉下来的 embedding 模型名
 
-- `GET /api/foreshadowing/<book_id>`
-- `POST /api/agent/foreshadow-detect`
-- `POST /api/agent/foreshadow-scan`
-- `GET /api/psychology/<book_id>`
-- `POST /api/psychology/<book_id>`
-- `GET /api/world-state/<book_id>`
-- `POST /api/world-state/<book_id>`
-- `POST /api/agent/world-state-extract`
-- `POST /api/agent/world-state-validate`
+### 8.6 把 Embedding 模型绑定到系统
 
-### 导入导出
+这里是当前项目最容易踩坑的地方。
 
-- `GET /api/export/<book_id>/<fmt>`
-- `POST /api/import`
+因为设置页没有 `embedding` 路由配置项，所以你要手工补路由。
 
-## 数据存储说明
+#### 第一步：登录并拿到 JWT
 
-本地运行后会生成：
+```bash
+curl -s http://127.0.0.1:5000/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"you@example.com","password":"your-password"}'
+```
 
-- `novel_platform.db`：SQLite 主数据库
-- `.encryption_key`：用于加密敏感字段的本地密钥文件
+响应里会有：
 
-加密字段包括：
+```json
+{"token":"...","user":{...}}
+```
 
-- API Key
-- 书籍描述等敏感文本
-- Lorebook 内容
-- 摘要、心理档案、人物历史等部分文本数据
+#### 第二步：查看模型列表
 
-请不要随意丢失 `.encryption_key`，否则旧数据中的加密字段可能无法正常解密。
+```bash
+TOKEN="替换成上一步返回的 token"
 
-## 开发说明
+curl -s http://127.0.0.1:5000/api/models \
+  -H "Authorization: Bearer $TOKEN"
+```
 
-### 代码分层建议
+找到你刚创建的 embedding 模型的 `id`。
 
-- `database.py` 负责 schema 与 CRUD
-- `memory_engine.py` 负责记忆与上下文聚合
-- `agents.py` 负责提示词与模型交互
-- `app.py` 负责 API 编排与权限控制
-- `static/js/app.js` 负责页面状态和交互逻辑
+#### 第三步：取出现有路由
 
-### 适合优先扩展的方向
+```bash
+curl -s http://127.0.0.1:5000/api/routing \
+  -H "Authorization: Bearer $TOKEN"
+```
 
-- 更强的人名别名识别与角色消歧
-- 自动从正文中抽取更细粒度的人物事件
-- 更稳定的结构化摘要与结构化角色事件抽取
-- 人物关系时间线视图
-- 更细致的冲突与弧光追踪
-- 多人协作与评论系统
+#### 第四步：把完整路由连同 `embedding` 一起回写
 
-## 已知限制
+示例：
 
-- 人物识别第一版主要依赖角色名和 Lorebook 关键词，不是通用 NER。
-- 人物历史的自动生成目前偏摘要型，适合辅助提醒，不等于严格的知识图谱。
-- 向量检索默认使用 TF-IDF，不是神经嵌入模型；更轻量，但语义能力有限。
-- 若未生成章节摘要，角色历史自动沉淀的质量会下降，但仍可使用手工记录和章节刷新。
-- 大部分 AI 能力依赖外部模型服务，模型未配置时相关功能无法工作。
+```bash
+curl -s http://127.0.0.1:5000/api/routing \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "planner": "model-planner-id",
+    "beat_generator": "model-beat-id",
+    "drafter": "model-drafter-id",
+    "validator": "model-validator-id",
+    "polisher": "model-polisher-id",
+    "summarizer": "model-summarizer-id",
+    "autocomplete": "model-autocomplete-id",
+    "association": "model-association-id",
+    "plan_and_solve": "model-plan-id",
+    "hallucination": "model-hallucination-id",
+    "embedding": "model-embedding-id"
+  }'
+```
 
-## 推荐使用习惯
+再次强调：这一步是**整张表覆盖写入**，不是局部 patch。
 
-为了让系统的长期记忆最稳定，建议按下面的节奏写作：
+### 8.7 构建 Embedding 索引
 
-1. 为主要角色建立 Lorebook 条目，并在 `keywords` 中写入别名。
-2. 每完成一章就生成摘要。
-3. 每完成关键章节就刷新一次当前章节人物历史。
-4. 定期检查未回收伏笔和世界状态。
-5. 在大转折前先运行一次幻觉检测和一致性验证。
+配置完成后，在 UI 中：
+
+- 右栏 `记忆`
+- `记忆状态`
+- 点击 `Embedding 索引`
+
+或者直接走 API：
+
+```bash
+curl -s -X POST http://127.0.0.1:5000/api/embedding/<book_id>/build \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+查看状态：
+
+```bash
+curl -s http://127.0.0.1:5000/api/embedding/<book_id>/status \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+## 9. 全功能部署检查清单
+
+部署完成后，建议按下面顺序验收：
+
+### 9.1 基础功能
+
+1. 能访问首页
+2. 能注册 / 登录
+3. 能创建书籍
+4. 能新建卷 / 章 / 场景
+5. 编辑器可自动保存
+
+### 9.2 模型功能
+
+1. 设置页能新增模型
+2. 任务路由能保存
+3. 架构师、节拍器、执笔者、验证者、润色可调用
+4. 自动补全和流式生成可正常结束
+
+### 9.3 记忆 / Embedding / 检索
+
+1. 章节摘要能生成
+2. `记忆状态` 正常显示
+3. TF-IDF / 向量检索能返回结果
+4. Embedding 索引能构建成功
+5. 人物提醒能刷新
+
+### 9.4 叙事与知识功能
+
+1. NER 可抽取实体
+2. 实体图谱可视化正常
+3. 时间线提取与冲突检测可用
+4. 世界状态提取 / 校验可用
+5. 伏笔检测 / payoff 扫描可用
+6. 潜台词、心理分析、叙事分析面板可出结果
+
+### 9.5 工程化功能
+
+1. 快照可创建 / 恢复
+2. 回收站可恢复节点
+3. 全局搜索 / 替换可用
+4. 一致性扫描会生成任务与报告
+5. 工作流模板可创建并运行
+6. Markdown / TXT / EPUB / JSON 导出可用
+7. JSON / MD / TXT / DOCX 导入可用
+
+## 10. 数据文件与备份
+
+运行后必须一起备份的文件：
+
+- `novel_platform.db`
+- `.encryption_key`
+- `.jwt_secret`
+
+理由：
+
+- `novel_platform.db` 是主数据。
+- `.encryption_key` 用于解密数据库内的敏感字段。
+- `.jwt_secret` 用于 JWT 签名；丢失后旧 token 失效。
+
+建议：
+
+- 备份时三者一起打包。
+- 不要只备份数据库而丢失 `.encryption_key`。
+- 上生产时确保这两个隐藏文件权限只对服务账号可读。
+
+## 11. 仓库结构
+
+```text
+app.py                    Flask 入口、认证、API、SSE
+database.py               SQLite schema、CRUD、加密
+agents.py                 AgentOrchestrator，多智能体与提示词
+memory_engine.py          三层记忆、动态注入、混合检索
+embedding_engine.py       Embedding API 适配、向量索引、语义检索
+search_engine.py          全书搜索、引用追踪
+rule_engine.py            写作规则中心
+timeline_engine.py        时间线抽取与冲突检测
+snapshot_engine.py        快照与回收站
+job_engine.py             进程内异步任务
+workflow_engine.py        章节工作流
+consistency_engine.py     全书体检
+knowledge_graph_engine.py 知识图谱
+foreshadow_engine.py      伏笔与 payoff
+narrative_engine.py       叙事分析
+ner_engine.py             NER 管线
+disambiguation_engine.py  共指/消歧
+export_engine.py          JSON / Markdown / TXT / EPUB / DOCX 导入导出
+static/                   前端资源
+templates/                HTML 模板
+TECHNICAL.md              技术架构与实现说明
+FEATURES.md               功能与 API 长文档
+EXTENDING.md              二次开发指南
+```
+
+## 12. 当前架构的已知限制
+
+- 当前没有 Dockerfile / docker-compose / Helm，README 采用的是源码部署方案。
+- 当前推荐单实例部署，不建议无脑横向扩容。
+- Base URL SSRF 校验会阻止直连本机 / 内网模型服务。
+- 设置页没有 `embedding` 路由配置项，需要手工补 API。
+- 前端默认依赖外部 CDN 资源；离线环境要自己替换。
+
+## 13. 一句话部署建议
+
+如果你要最快把“所有功能”跑起来，建议按这条路径：
+
+1. 单机部署墨境：`python app.py`
+2. Nginx 反代应用域名
+3. 配一个通用聊天模型
+4. 再配一个独立 Embedding 模型
+5. 用 API 手工补 `embedding` 路由
+6. 安装 `faiss-cpu`
+7. 构建 Embedding 索引
+
+这样可以覆盖：
+
+- 多智能体写作
+- 三层记忆
+- 人物提醒
+- 语义检索
+- 知识图谱 / NER / 时间线
+- 伏笔 / 心理 / 世界状态
+- 快照 / 搜索 / 工作流 / 一致性报告
 
 ## 许可证
 
-仓库中暂未提供单独的许可证文件。如需开源发布，请补充明确的 LICENSE。
+仓库当前未附带单独的 `LICENSE` 文件。如果你准备公开发布，请先补充许可证。

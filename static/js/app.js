@@ -23,18 +23,41 @@ const App = {
     lastConflictData: null,
     draggingNodeId: null,
     focusMode: localStorage.getItem('focus_mode') === '1',
+    themeMode: localStorage.getItem('ui_theme_mode') || 'light',
     versionCache: [],
     guardHardBlocked: false,
+    leftTab: localStorage.getItem('ui_left_tab') || 'outline',
+    rightTab: localStorage.getItem('ui_right_tab') || 'agent',
+    activeAgent: localStorage.getItem('ui_active_agent') || 'planner',
+    activeAgentGroup: localStorage.getItem('ui_agent_group') || 'planning',
+    sectionFolds: (() => {
+        try {
+            return JSON.parse(localStorage.getItem('ui_section_folds') || '{}');
+        } catch (e) {
+            return {};
+        }
+    })(),
+    agentOutputObserver: null,
 
     // ==================== 初始化 ====================
     async init() {
-        const ok = await this.ensureAuth();
-        if (!ok) return;
+        this.applyTheme(this.themeMode, false);
         this.applyFocusMode(this.focusMode, false);
-        this.updateUserPill();
-        await this.loadBooks();
         this.setupEditorEvents();
         this.setupSelectionPopup();
+        this.setupAgentOutputObserver();
+        this.initFoldSections();
+        this.switchLeftTab(this.leftTab);
+        this.switchRightTab(this.rightTab);
+        this.selectAgent(this.activeAgent);
+        this.syncAgentOutputVisibility();
+        this.updateUserPill();
+        const ok = await this.ensureAuth();
+        if (!ok) {
+            console.log('墨境 · UI 已初始化，等待登录');
+            return;
+        }
+        await this.loadBooks();
         console.log('墨境 · AI 长篇小说写作平台 已启动');
     },
 
@@ -145,6 +168,41 @@ const App = {
         this.applyFocusMode(!this.focusMode, true);
     },
 
+    toggleTheme() {
+        this.applyTheme(this.themeMode === 'dark' ? 'light' : 'dark', true);
+    },
+
+    applyTheme(mode, shouldToast = true) {
+        const nextMode = mode === 'dark' ? 'dark' : 'light';
+        this.themeMode = nextMode;
+        const root = document.documentElement;
+        root.classList.toggle('theme-dark', nextMode === 'dark');
+        root.classList.toggle('theme-light', nextMode !== 'dark');
+        document.body.classList.toggle('theme-dark', nextMode === 'dark');
+        document.body.classList.toggle('theme-light', nextMode !== 'dark');
+        document.documentElement.style.colorScheme = nextMode;
+        localStorage.setItem('ui_theme_mode', nextMode);
+
+        const btn = document.getElementById('themeToggleBtn');
+        const icon = document.getElementById('themeToggleIcon');
+        const label = document.getElementById('themeToggleLabel');
+        const targetModeLabel = nextMode === 'dark' ? '浅色模式' : '深色模式';
+
+        if (btn) {
+            btn.title = `切换到${targetModeLabel}`;
+            btn.setAttribute('aria-label', `切换到${targetModeLabel}`);
+        }
+        if (icon) {
+            icon.className = nextMode === 'dark' ? 'fas fa-sun' : 'fas fa-moon';
+        }
+        if (label) {
+            label.textContent = nextMode === 'dark' ? '深色' : '浅色';
+        }
+        if (shouldToast) {
+            this.toast(nextMode === 'dark' ? '已切换为深色模式' : '已切换为浅色模式', 'info');
+        }
+    },
+
     applyFocusMode(enabled, shouldToast = true) {
         this.focusMode = !!enabled;
         document.body.classList.toggle('focus-mode', this.focusMode);
@@ -199,6 +257,95 @@ const App = {
         setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 300); }, 3500);
     },
 
+    persistUiValue(key, value) {
+        localStorage.setItem(key, value);
+    },
+
+    persistSectionFolds() {
+        localStorage.setItem('ui_section_folds', JSON.stringify(this.sectionFolds));
+    },
+
+    initFoldSections() {
+        document.querySelectorAll('.fold-section[data-fold-key]').forEach((section) => {
+            const key = section.dataset.foldKey;
+            const isOpen = Object.prototype.hasOwnProperty.call(this.sectionFolds, key)
+                ? !!this.sectionFolds[key]
+                : section.classList.contains('is-open');
+            this.applySectionFoldState(key, isOpen, false);
+        });
+    },
+
+    applySectionFoldState(key, isOpen, persist = true) {
+        const section = document.querySelector(`.fold-section[data-fold-key="${key}"]`);
+        if (!section) return;
+        section.classList.toggle('is-open', !!isOpen);
+        const header = section.querySelector('.fold-section-header');
+        const body = section.querySelector('.fold-section-body');
+        if (header) header.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+        if (body) body.hidden = !isOpen;
+        if (persist) {
+            this.sectionFolds[key] = !!isOpen;
+            this.persistSectionFolds();
+        }
+    },
+
+    toggleSectionFold(key, forceState = null) {
+        const section = document.querySelector(`.fold-section[data-fold-key="${key}"]`);
+        if (!section) return;
+        const nextState = forceState === null ? !section.classList.contains('is-open') : !!forceState;
+        this.applySectionFoldState(key, nextState, true);
+    },
+
+    setupAgentOutputObserver() {
+        const output = document.getElementById('agentOutput');
+        if (!output) return;
+        if (this.agentOutputObserver) {
+            this.agentOutputObserver.disconnect();
+        }
+        this.agentOutputObserver = new MutationObserver(() => this.syncAgentOutputVisibility());
+        this.agentOutputObserver.observe(output, {
+            childList: true,
+            subtree: true,
+            characterData: true
+        });
+    },
+
+    syncAgentOutputVisibility() {
+        const output = document.getElementById('agentOutput');
+        const meta = document.getElementById('agentOutputMeta');
+        const section = document.querySelector('.fold-section[data-fold-key="agent-output"]');
+        if (!output || !meta || !section) return;
+
+        const hasLoading = !!output.querySelector('.loading-spinner');
+        const hasEmptyState = !!output.querySelector('.empty-state');
+        const plainText = (output.textContent || '').trim();
+        const hasRichContent = output.children.length > 0 && !hasEmptyState;
+        const hasContent = hasLoading || (!!plainText && !hasEmptyState) || hasRichContent;
+
+        section.classList.toggle('is-empty', !hasContent && !hasLoading);
+        meta.textContent = hasLoading ? '生成中' : hasContent ? '可上屏' : '待生成';
+
+        if (hasContent || hasLoading) {
+            this.applySectionFoldState('agent-output', true, false);
+        } else {
+            this.applySectionFoldState('agent-output', false, false);
+        }
+    },
+
+    resetAgentOutputPanel() {
+        const output = document.getElementById('agentOutput');
+        if (!output) return;
+        output.innerHTML = `
+            <div class="empty-state">
+                <i class="fas fa-scroll"></i>
+                <p>AI 生成结果会显示在这里</p>
+            </div>
+        `;
+        this.agentOutputText = '';
+        this.guardHardBlocked = false;
+        this.syncAgentOutputVisibility();
+    },
+
     // ==================== 书籍管理 ====================
     async loadBooks() {
         const books = await this.api('/api/books');
@@ -249,6 +396,7 @@ const App = {
         this.currentBookId = bookId;
         this.currentNodeId = null;
         this.versionCache = [];
+        this.resetAgentOutputPanel();
         document.getElementById('editorArea').innerText = '';
         document.getElementById('editorPath').textContent = '未选择章节';
         if (bookId) {
@@ -262,9 +410,13 @@ const App = {
         } else {
             document.getElementById('docTree').innerHTML = '<div class="empty-state"><i class="fas fa-book-open"></i><p>请选择或创建一本书籍</p></div>';
             document.getElementById('tensionSummary').textContent = '尚未诊断';
-            document.getElementById('tensionChart').innerHTML = '';
+            document.getElementById('memoryTensionChart').innerHTML = '';
             document.getElementById('tensionWarnings').innerHTML = '';
             document.getElementById('characterReminderList').innerHTML = '<div class="empty-state"><p>请选择书籍后查看人物提醒</p></div>';
+            ['analysisTensionChart', 'emotionChart', 'characterArcChart', 'foreshadowDistChart', 'pacingDiagnosis', 'arcCompleteness'].forEach((id) => {
+                const el = document.getElementById(id);
+                if (el) el.innerHTML = '';
+            });
         }
     },
 
@@ -957,16 +1109,20 @@ const App = {
     // ==================== 左侧面板标签切换 ====================
     switchLeftTab(tab) {
         document.querySelectorAll('#panelLeft .panel-tab').forEach(t => t.classList.remove('active'));
-        document.querySelector(`#panelLeft .panel-tab[data-tab="${tab}"]`).classList.add('active');
+        document.querySelector(`#panelLeft .panel-tab[data-tab="${tab}"]`)?.classList.add('active');
         document.querySelectorAll('#panelLeft .tab-content').forEach(c => c.classList.remove('active'));
-        document.getElementById('tab' + tab.charAt(0).toUpperCase() + tab.slice(1)).classList.add('active');
+        document.getElementById('tab' + tab.charAt(0).toUpperCase() + tab.slice(1))?.classList.add('active');
+        this.leftTab = tab;
+        this.persistUiValue('ui_left_tab', tab);
     },
 
     switchRightTab(tab) {
         document.querySelectorAll('#panelRight .panel-tab').forEach(t => t.classList.remove('active'));
-        document.querySelector(`#panelRight .panel-tab[data-tab="${tab}"]`).classList.add('active');
+        document.querySelector(`#panelRight .panel-tab[data-tab="${tab}"]`)?.classList.add('active');
         document.querySelectorAll('#panelRight .tab-content').forEach(c => c.classList.remove('active'));
-        document.getElementById('tab' + tab.charAt(0).toUpperCase() + tab.slice(1)).classList.add('active');
+        document.getElementById('tab' + tab.charAt(0).toUpperCase() + tab.slice(1))?.classList.add('active');
+        this.rightTab = tab;
+        this.persistUiValue('ui_right_tab', tab);
         if (tab === 'memory') {
             this.loadCharacterReminders();
         }
@@ -1130,6 +1286,29 @@ const App = {
 
     // ==================== Agent 面板 ====================
     selectAgent(agent) {
+        if (!document.querySelector(`.agent-btn[data-agent="${agent}"]`)) {
+            agent = 'planner';
+        }
+        const groupMap = {
+            planner: 'planning',
+            beats: 'planning',
+            conflict: 'planning',
+            brainstorm: 'planning',
+            drafter: 'writing',
+            continuation: 'writing',
+            polisher: 'writing',
+            plansolve: 'writing',
+            validator: 'validation',
+            hallcheck: 'validation',
+            worldstate: 'validation',
+            foreshadow: 'validation',
+            subtext: 'analysis',
+            psychology: 'analysis'
+        };
+        const targetGroup = groupMap[agent];
+        if (targetGroup) {
+            this.switchAgentGroup(targetGroup, null, false);
+        }
         document.querySelectorAll('.agent-btn').forEach(b => b.classList.remove('active'));
         document.querySelector(`.agent-btn[data-agent="${agent}"]`)?.classList.add('active');
 
@@ -1142,6 +1321,9 @@ const App = {
             worldstate: 'agentWorldstate', plansolve: 'agentPlansolve', hallcheck: 'agentHallcheck'
         };
         document.getElementById(panels[agent])?.classList.add('active');
+        this.activeAgent = agent;
+        this.persistUiValue('ui_active_agent', agent);
+        this.applySectionFoldState('agent-workbench', true, false);
     },
 
     async runPlanner() {
@@ -1151,6 +1333,7 @@ const App = {
 
         const output = document.getElementById('agentOutput');
         output.innerHTML = '<div class="loading-spinner"></div> 架构师正在规划大纲...';
+        this.agentOutputText = '';
 
         const res = await this.api('/api/agent/plan', 'POST', {
             inspiration,
@@ -1174,6 +1357,7 @@ const App = {
 
         const output = document.getElementById('agentOutput');
         output.innerHTML = '<div class="loading-spinner"></div> 节拍器正在拆解场景...';
+        this.agentOutputText = '';
 
         const res = await this.api('/api/agent/beats', 'POST', {
             chapter_outline: outline,
@@ -1275,6 +1459,7 @@ const App = {
 
         const output = document.getElementById('agentOutput');
         output.innerHTML = '<div class="loading-spinner"></div> 验证者正在审查文本...';
+        this.agentOutputText = '';
 
         const res = await this.api('/api/agent/validate', 'POST', {
             text,
@@ -1294,6 +1479,7 @@ const App = {
 
         const output = document.getElementById('agentOutput');
         output.innerHTML = '<div class="loading-spinner"></div> 润色 Agent 处理中...';
+        this.agentOutputText = '';
 
         const res = await this.api('/api/agent/polish', 'POST', {
             text,
@@ -1330,9 +1516,7 @@ const App = {
     },
 
     clearAgentOutput() {
-        document.getElementById('agentOutput').innerHTML = '';
-        this.agentOutputText = '';
-        this.guardHardBlocked = false;
+        this.resetAgentOutputPanel();
     },
 
     // ==================== 记忆面板 ====================
@@ -1514,7 +1698,7 @@ const App = {
     async loadTensionDiagnostics() {
         if (!this.currentBookId) return;
         const summary = document.getElementById('tensionSummary');
-        const chart = document.getElementById('tensionChart');
+        const chart = document.getElementById('memoryTensionChart');
         const warnings = document.getElementById('tensionWarnings');
         summary.textContent = '诊断中...';
         chart.innerHTML = '<div class="loading-spinner"></div>';
@@ -1531,7 +1715,7 @@ const App = {
 
     renderTensionDiagnostics(data) {
         const summary = document.getElementById('tensionSummary');
-        const chart = document.getElementById('tensionChart');
+        const chart = document.getElementById('memoryTensionChart');
         const warnings = document.getElementById('tensionWarnings');
         const chapters = data?.chapters || [];
         const avg = data?.average_tension ?? 0;
@@ -1664,9 +1848,9 @@ const App = {
         document.getElementById('settingsModal').style.display = 'none';
     },
 
-    switchSettingsTab(tab) {
+    switchSettingsTab(tab, evt = null) {
         document.querySelectorAll('.settings-tab').forEach(t => t.classList.remove('active'));
-        event.target.classList.add('active');
+        evt?.target?.classList.add('active');
         document.querySelectorAll('.settings-content').forEach(c => c.classList.remove('active'));
         const map = { models: 'settingsModels', routing: 'settingsRouting', params: 'settingsParams', rules: 'settingsRules', tokens: 'settingsTokens', stats: 'settingsStats' };
         document.getElementById(map[tab]).classList.add('active');
@@ -2137,6 +2321,7 @@ const App = {
 
         const output = document.getElementById('agentOutput');
         output.innerHTML = '<div class="loading-spinner"></div> 冲突设计Agent正在分析角色关系...';
+        this.agentOutputText = '';
 
         const res = await this.api('/api/agent/conflict', 'POST', {
             book_id: this.currentBookId,
@@ -2242,6 +2427,7 @@ const App = {
 
         const output = document.getElementById('agentOutput');
         output.innerHTML = '<div class="loading-spinner"></div> 联想Agent正在发散思维...';
+        this.agentOutputText = '';
 
         const res = await this.api('/api/agent/associate', 'POST', {
             book_id: this.currentBookId,
@@ -2384,6 +2570,7 @@ const App = {
 
         const output = document.getElementById('agentOutput');
         output.innerHTML = '<div class="loading-spinner"></div> 正在检测伏笔元素...';
+        this.agentOutputText = '';
 
         const res = await this.api('/api/agent/foreshadow-detect', 'POST', {
             text,
@@ -2414,6 +2601,7 @@ const App = {
 
         const output = document.getElementById('agentOutput');
         output.innerHTML = '<div class="loading-spinner"></div> 正在扫描待填坑伏笔...';
+        this.agentOutputText = '';
 
         const node = this.currentNodeId ? await this.api(`/api/nodes/${this.currentNodeId}`) : null;
         const res = await this.api('/api/agent/foreshadow-scan', 'POST', {
@@ -2485,6 +2673,7 @@ const App = {
 
         const output = document.getElementById('agentOutput');
         output.innerHTML = '<div class="loading-spinner"></div> 正在分析潜台词...';
+        this.agentOutputText = '';
 
         const res = await this.api('/api/agent/subtext', 'POST', {
             text,
@@ -2508,6 +2697,7 @@ const App = {
 
         const output = document.getElementById('agentOutput');
         output.innerHTML = '<div class="loading-spinner"></div> 正在进行深层心理分析...';
+        this.agentOutputText = '';
 
         const res = await this.api('/api/agent/psychology', 'POST', {
             text,
@@ -2531,6 +2721,7 @@ const App = {
 
         const output = document.getElementById('agentOutput');
         output.innerHTML = '<div class="loading-spinner"></div> 正在提取世界状态...';
+        this.agentOutputText = '';
 
         const res = await this.api('/api/agent/world-state-extract', 'POST', {
             text,
@@ -2554,6 +2745,7 @@ const App = {
 
         const output = document.getElementById('agentOutput');
         output.innerHTML = '<div class="loading-spinner"></div> 正在验证一致性...';
+        this.agentOutputText = '';
 
         const res = await this.api('/api/agent/world-state-validate', 'POST', {
             text,
@@ -2707,6 +2899,7 @@ const App = {
 
         const output = document.getElementById('agentOutput');
         output.innerHTML = '<div class="loading-spinner"></div> 多维幻觉检测中...';
+        this.agentOutputText = '';
         const guardStatus = document.getElementById('guardStatus');
         guardStatus.style.display = 'flex';
         document.getElementById('guardStatusText').textContent = '检测中...';
@@ -2847,12 +3040,18 @@ const App = {
     },
 
     // ==================== Agent Group Switching ====================
-    switchAgentGroup(group) {
+    switchAgentGroup(group, evt = null, persist = true) {
         document.querySelectorAll('.agent-group-tab').forEach(t => t.classList.remove('active'));
-        event.target.closest('.agent-group-tab').classList.add('active');
+        const activeBtn = evt?.target?.closest('.agent-group-tab')
+            || document.querySelector(`.agent-group-tab[data-group="${group}"]`);
+        activeBtn?.classList.add('active');
         document.querySelectorAll('.agent-group[data-group]').forEach(g => g.classList.remove('active'));
         const target = document.querySelector(`.agent-group[data-group="${group}"]`);
         if (target) target.classList.add('active');
+        this.activeAgentGroup = group;
+        if (persist) {
+            this.persistUiValue('ui_agent_group', group);
+        }
     },
 
     // ==================== Global Search ====================
@@ -3128,9 +3327,9 @@ const App = {
     closeSnapshots() {
         document.getElementById('snapshotModal').style.display = 'none';
     },
-    switchSnapshotTab(tab) {
+    switchSnapshotTab(tab, evt = null) {
         document.querySelectorAll('.snapshot-tab').forEach(t => t.classList.remove('active'));
-        event.target.classList.add('active');
+        evt?.target?.classList.add('active');
         document.getElementById('snapshotList').style.display = tab === 'snapshots' ? 'block' : 'none';
         document.getElementById('recycleList').style.display = tab === 'recycle' ? 'block' : 'none';
         if (tab === 'recycle') this.loadRecycleBin();
@@ -3744,7 +3943,7 @@ const App = {
         if (comp) this.renderArcCompleteness(comp);
     },
     renderTensionChart(data) {
-        const container = document.getElementById('tensionChart');
+        const container = document.getElementById('analysisTensionChart');
         if (!data || data.length < 2) { container.innerHTML = '<p class="memory-helper-text">数据不足</p>'; return; }
         const w = 500, h = 120, pad = 30;
         const n = data.length;

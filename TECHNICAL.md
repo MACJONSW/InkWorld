@@ -6,24 +6,48 @@
 
 ## 1. 系统总览
 
-系统本质上是一个由 Flask 驱动的多层写作平台：
+系统当前是一个典型的“浏览器工作台 + Flask 单体应用 + SQLite 持久化 + 外部 OpenAI 兼容模型服务”的结构。
 
-1. 浏览器前端提供三栏写作工作台，负责状态管理、流式展示和用户交互。
-2. Flask API 层负责认证、权限校验、书籍/章节管理、导入导出和智能体调用。
-3. `AgentOrchestrator` 负责把用户输入、记忆上下文和系统约束组装为提示词，并调用外部大模型。
-4. `MemoryEngine` 负责构建三层记忆窗口、动态注入 Lorebook、向量检索和人物提醒上下文。
-5. `Database` 负责 SQLite 持久化、字段加密、树结构、摘要、伏笔、心理档案、世界状态和人物历史。
-
-从模块边界上看，可以理解为：
+真实运行链路如下：
 
 ```text
 Browser UI
-  -> app.py (Flask routes + auth + API)
-    -> agents.py (LLM orchestration)
-    -> memory_engine.py (context assembly)
-    -> database.py (SQLite persistence)
-    -> export_engine.py (workspace import/export)
+  ├─ templates/index.html
+  ├─ static/js/app.js
+  └─ static/css/style.css
+        │
+        │ HTTP / SSE
+        ▼
+app.py
+  ├─ JWT 认证 / 资源权限校验
+  ├─ 书籍 / 节点 / 版本 / 快照 / 回收站
+  ├─ 模型配置 / 路由 / 生成参数 / Token 统计
+  ├─ Agent API / Inline Commands / SSE 流式生成
+  ├─ Embedding / NER / 图谱 / 伏笔 / 叙事分析 / 时间线
+  ├─ 工作流 / 异步任务 / 一致性扫描 / 搜索
+  └─ 导入导出
+        │
+        ├─ AgentOrchestrator
+        ├─ MemoryEngine
+        ├─ EmbeddingEngine
+        ├─ NEREngine / DisambiguationEngine
+        ├─ KnowledgeGraphEngine / ForeshadowEngine / NarrativeEngine
+        ├─ RuleEngine / TimelineEngine / SnapshotEngine
+        ├─ SearchEngine / WorkflowEngine / ConsistencyEngine / StatsEngine
+        ├─ JobEngine
+        └─ ExportEngine
+                │
+                ▼
+         SQLite + 本地密钥文件
 ```
+
+需要特别强调三点：
+
+1. 当前版本是**单体应用**，不是拆分式微服务。
+2. 异步任务由 `job_engine.py` 在**当前进程内线程**执行，不依赖 Celery / Redis。
+3. Embedding / TF-IDF / BM25 / FAISS 索引有一部分会缓存在**当前应用进程内存**中。
+
+这也是为什么当前版本在部署上最适合“单机单进程 + SQLite”的原因。
 
 ## 2. 目录与职责
 
@@ -31,11 +55,22 @@ Browser UI
 
 | 文件 | 主要职责 |
 | --- | --- |
-| `app.py` | Flask 应用入口、认证、权限校验、REST API、SSE 流式响应、启动服务 |
-| `agents.py` | `AgentOrchestrator`，统一管理模型路由、参数、流式和非流式调用、所有智能体实现 |
-| `memory_engine.py` | 三层记忆、向量检索、Lorebook 动态注入、人物提醒聚合、人物历史自动沉淀 |
-| `database.py` | SQLite schema、CRUD、加密/解密、导入导出底层数据访问 |
-| `export_engine.py` | Markdown/TXT/EPUB/JSON 工作区导入导出 |
+| `app.py` | Flask 应用入口、JWT 认证、资源校验、REST API、SSE 流式响应、启动服务 |
+| `agents.py` | `AgentOrchestrator`，统一管理模型路由、参数、流式与非流式调用、所有 Agent 提示词 |
+| `memory_engine.py` | 三层记忆、动态注入、人物提醒、TF-IDF / BM25 / FAISS 混合检索 |
+| `embedding_engine.py` | OpenAI 兼容 Embedding API 接入、语义索引构建、向量检索 |
+| `database.py` | SQLite schema、CRUD、字段加密/解密、用户/书籍/节点/规则/任务等统一持久化 |
+| `search_engine.py` | 全书搜索、跨章节引用查询、替换预览 |
+| `rule_engine.py` | 写作规则中心、规则继承、提示词注入 |
+| `timeline_engine.py` | 时间线抽取、冲突检测、状态迁移 |
+| `snapshot_engine.py` | 快照、恢复、回收站 |
+| `job_engine.py` | 进程内异步任务执行与取消/重试 |
+| `workflow_engine.py` | 章节工作流模板与步骤执行 |
+| `consistency_engine.py` | 全书一致性扫描与报告 |
+| `knowledge_graph_engine.py` | 知识图谱抽取、图关系访问层 |
+| `foreshadow_engine.py` | 伏笔池、payoff 检测、伏笔密度 |
+| `narrative_engine.py` | 章节叙事指标、张力/情绪/弧线分析 |
+| `export_engine.py` | Markdown / TXT / EPUB / JSON 导入导出 |
 | `templates/index.html` | 三栏主工作台结构 |
 | `static/js/app.js` | 前端状态机、API 调用、编辑器逻辑、流式消费、人物提醒刷新 |
 | `static/css/style.css` | 工作台布局、记忆面板、人物提醒卡、智能体区域样式 |
@@ -45,8 +80,11 @@ Browser UI
 - `app.py` 是请求入口。
 - `AgentOrchestrator` 是 LLM 调度核心。
 - `MemoryEngine` 是提示词上下文构建器。
+- `EmbeddingEngine` 是语义检索的 OpenAI Embedding 适配层。
+- `JobEngine` 是当前版本的后台任务执行器。
 - `Database` 是唯一的持久化边界。
 - `ExportEngine` 负责把内部数据结构投影成外部文件格式。
+- 其他 `*_engine.py` 负责各自的领域能力，不直接管理鉴权与 HTTP。
 
 ## 3. 运行时入口与请求流
 
@@ -57,10 +95,27 @@ Browser UI
 ```python
 if __name__ == '__main__':
     db.init_db()
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)
+    debug_mode = os.environ.get('FLASK_DEBUG', '0') == '1'
+    socketio.run(
+        app,
+        host='0.0.0.0',
+        port=5000,
+        debug=debug_mode,
+        allow_unsafe_werkzeug=debug_mode,
+    )
 ```
 
-虽然当前版本里 SocketIO 主要承担运行时能力预留，核心流式生成仍然走的是 Flask 的 `text/event-stream` 响应。
+同时，`SocketIO` 当前初始化方式是：
+
+```python
+socketio = SocketIO(app, cors_allowed_origins=ALLOWED_ORIGINS, async_mode='threading')
+```
+
+所以当前版本的真实语义是：
+
+- 主流式通道仍然是 Flask `text/event-stream`
+- `SocketIO` 目前主要作为实时能力扩展位
+- 后台任务与请求并发主要依赖 Python 线程，而不是外部消息总线
 
 ## 3.2 请求进入 Flask 之后发生什么
 
