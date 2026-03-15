@@ -61,7 +61,7 @@ class AgentOrchestrator:
         )
         return client, model_config['model_id'], model_config
 
-    def _get_params(self):
+    def _get_params(self, role=None):
         user_id = self._current_user_id()
         if not user_id:
             return {
@@ -71,7 +71,12 @@ class AgentOrchestrator:
                 'frequency_penalty': 0.0,
                 'max_tokens': 2000,
             }
-        params = self.db.get_generation_params(user_id)
+        if role:
+            from role_registry import ROLE_CATEGORY_MAP
+            category = ROLE_CATEGORY_MAP.get(role, 'generative')
+            params = self.db.get_generation_params_by_category(user_id, category)
+        else:
+            params = self.db.get_generation_params(user_id)
         return {
             'temperature': params.get('temperature', 0.7),
             'top_p': params.get('top_p', 0.9),
@@ -98,7 +103,7 @@ class AgentOrchestrator:
                 return
             return "⚠️ 未配置模型，请先在设置中添加模型并分配角色路由。"
 
-        params = self._get_params()
+        params = self._get_params(role)
         user_id = self._current_user_id()
         start_time = time.time()
         first_token_time = None

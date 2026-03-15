@@ -419,13 +419,21 @@ def set_routing():
 
 @app.route('/api/generation-params', methods=['GET'])
 def get_gen_params():
-    params = db.get_generation_params(g.user_id)
-    return jsonify(params)
+    category = request.args.get('category')
+    if category:
+        params = db.get_generation_params_by_category(g.user_id, category)
+        return jsonify(params)
+    all_params = db.get_all_category_generation_params(g.user_id)
+    return jsonify(all_params)
 
 @app.route('/api/generation-params', methods=['POST'])
 def set_gen_params():
     data = _json_body()
-    db.set_generation_params(data, g.user_id)
+    category = data.get('category')
+    if category:
+        db.set_generation_params_by_category(g.user_id, category, data)
+    else:
+        db.set_generation_params(data, g.user_id)
     return jsonify({'status': 'ok'})
 
 @app.route('/api/token-stats', methods=['GET'])

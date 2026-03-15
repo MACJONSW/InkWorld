@@ -1182,7 +1182,16 @@ body.focus-mode .focus-exit-btn {
 .model-card:hover { border-color: var(--accent); }
 
 .model-card-info { flex: 1; }
-.model-card-name { font-weight: 600; font-size: 13px; }
+.model-card-name { font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 6px; }
+.model-type-badge {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 600;
+    color: #fff;
+    padding: 1px 6px;
+    border-radius: 3px;
+    white-space: nowrap;
+}
 .model-card-detail {
     font-size: 11px;
     color: var(--text-muted);
@@ -1201,6 +1210,21 @@ body.focus-mode .focus-exit-btn {
 
 /* 路由配置 */
 .routing-grid { margin-bottom: 16px; }
+
+.routing-category-header {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--accent);
+    padding: 10px 0 4px;
+    margin-top: 4px;
+    border-bottom: 2px solid var(--accent);
+}
+.routing-category-desc {
+    font-weight: 400;
+    color: var(--text-muted);
+    font-size: 11px;
+    margin-left: 6px;
+}
 
 .routing-row {
     display: flex;
@@ -1229,6 +1253,31 @@ body.focus-mode .focus-exit-btn {
 }
 
 /* 参数调节 */
+.param-category-tabs {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+}
+.param-cat-tab {
+    padding: 6px 14px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 20px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+.param-cat-tab:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+}
+.param-cat-tab.active {
+    color: var(--accent);
+    background: var(--accent-subtle, rgba(78,205,196,0.1));
+    border-color: var(--accent);
+}
 .param-grid { margin-bottom: 16px; }
 
 .param-item {

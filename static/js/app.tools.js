@@ -35,21 +35,29 @@ Object.assign(window.App, {
             list.innerHTML = '<div class="empty-state"><p>未添加模型配置<br>请点击"添加模型"</p></div>';
             return;
         }
-        list.innerHTML = models.map(m => `
+        list.innerHTML = models.map(m => {
+            const catLabels = {generative:'生成型',reasoning:'推理型',economic:'经济型',embedding:'Embedding'};
+            const catColors = {generative:'#4ecdc4',reasoning:'#ff6b6b',economic:'#ffd93d',embedding:'#6c5ce7'};
+            const catName = catLabels[m.model_type] || '生成型';
+            const catColor = catColors[m.model_type] || '#4ecdc4';
+            return `
             <div class="model-card">
                 <div class="model-card-info">
-                    <div class="model-card-name">${this.escHtml(m.name)}</div>
+                    <div class="model-card-name">
+                        <span class="model-type-badge" style="background:${catColor}">${catName}</span>
+                        ${this.escHtml(m.name)}
+                    </div>
                     <div class="model-card-detail">${this.escHtml(m.provider)} | ${this.escHtml(m.model_id)} | Key: ${this.escHtml(m.api_key_display)} | Max: ${m.max_context}</div>
                 </div>
                 <div class="model-card-actions">
                     <button class="btn btn-xs btn-ghost" onclick="App.editModel('${m.id}')"><i class="fas fa-pen"></i></button>
                     <button class="btn btn-xs btn-ghost" onclick="App.removeModel('${m.id}')"><i class="fas fa-trash"></i></button>
                 </div>
-            </div>
-        `).join('');
+            </div>`;
+        }).join('');
     },
 
-    addModel() {
+    addModel(presetType) {
         document.getElementById('modelFormId').value = '';
         document.getElementById('modelName').value = '';
         document.getElementById('modelProvider').value = 'openai';
@@ -57,6 +65,7 @@ Object.assign(window.App, {
         document.getElementById('modelApiKey').value = '';
         document.getElementById('modelModelId').value = '';
         document.getElementById('modelMaxCtx').value = '8192';
+        document.getElementById('modelType').value = presetType || 'generative';
         document.getElementById('modelFormTitle').textContent = '添加模型';
         document.getElementById('modelForm').style.display = 'block';
     },
@@ -73,6 +82,7 @@ Object.assign(window.App, {
         document.getElementById('modelApiKey').value = m.api_key;
         document.getElementById('modelModelId').value = m.model_id;
         document.getElementById('modelMaxCtx').value = m.max_context;
+        document.getElementById('modelType').value = m.model_type || 'generative';
         document.getElementById('modelFormTitle').textContent = '编辑模型';
         document.getElementById('modelForm').style.display = 'block';
     },
@@ -85,7 +95,8 @@ Object.assign(window.App, {
             base_url: document.getElementById('modelBaseUrl').value,
             api_key: document.getElementById('modelApiKey').value,
             model_id: document.getElementById('modelModelId').value,
-            max_context: parseInt(document.getElementById('modelMaxCtx').value)
+            max_context: parseInt(document.getElementById('modelMaxCtx').value),
+            model_type: document.getElementById('modelType').value
         };
 
         if (!data.name || !data.base_url) { this.toast('请填写名称和 Base URL', 'warning'); return; }
@@ -121,21 +132,41 @@ Object.assign(window.App, {
         const models = await this.api('/api/models');
         const routing = await this.api('/api/routing');
         const roles = this.getRoutingRoles();
+        const categories = (window.APP_ROLE_REGISTRY?.model_categories) || [];
+        const catMap = {};
+        categories.forEach(c => { catMap[c.id] = c; });
 
+        // 按 category 分组
+        const grouped = {};
+        roles.forEach(r => {
+            const cat = r.category || 'generative';
+            if (!grouped[cat]) grouped[cat] = [];
+            grouped[cat].push(r);
+        });
+
+        const catOrder = ['generative', 'reasoning', 'economic', 'embedding'];
         const grid = document.getElementById('routingGrid');
-        grid.innerHTML = roles.map(r => {
-            const opts = models?.map(m =>
-                `<option value="${m.id}" ${routing?.[r.id] === m.id ? 'selected' : ''}>${m.name}</option>`
-            ).join('') || '';
-            return `
-                <div class="routing-row">
-                    <div class="routing-role"><i class="fas ${r.icon}"></i> ${r.name}</div>
-                    <select class="routing-select" data-role="${r.id}">
-                        <option value="">— 使用默认 —</option>
-                        ${opts}
-                    </select>
-                </div>`;
-        }).join('');
+        let html = '';
+        for (const catId of catOrder) {
+            const catRoles = grouped[catId];
+            if (!catRoles || catRoles.length === 0) continue;
+            const catInfo = catMap[catId] || {name: catId, icon: 'fa-cube'};
+            html += `<div class="routing-category-header"><i class="fas ${catInfo.icon}"></i> ${catInfo.name} <span class="routing-category-desc">${catInfo.desc || ''}</span></div>`;
+            for (const r of catRoles) {
+                const opts = models?.map(m =>
+                    `<option value="${m.id}" ${routing?.[r.id] === m.id ? 'selected' : ''}>${m.name}</option>`
+                ).join('') || '';
+                html += `
+                    <div class="routing-row">
+                        <div class="routing-role"><i class="fas ${r.icon}"></i> ${r.name}</div>
+                        <select class="routing-select" data-role="${r.id}">
+                            <option value="">— 自动（同类别模型）—</option>
+                            ${opts}
+                        </select>
+                    </div>`;
+            }
+        }
+        grid.innerHTML = html;
     },
 
     async saveRouting() {
@@ -147,33 +178,73 @@ Object.assign(window.App, {
         this.toast('路由配置已保存', 'success');
     },
 
-    // 生成参数
+    // 生成参数（按模型类别分离）
     async loadGenParams() {
-        const params = await this.api('/api/generation-params');
-        if (params) {
-            document.getElementById('paramTemp').value = params.temperature ?? 0.7;
-            document.getElementById('tempValue').textContent = (params.temperature ?? 0.7).toFixed(2);
-            document.getElementById('paramTopP').value = params.top_p ?? 0.9;
-            document.getElementById('topPValue').textContent = (params.top_p ?? 0.9).toFixed(2);
-            document.getElementById('paramPP').value = params.presence_penalty ?? 0;
-            document.getElementById('ppValue').textContent = (params.presence_penalty ?? 0).toFixed(2);
-            document.getElementById('paramFP').value = params.frequency_penalty ?? 0;
-            document.getElementById('fpValue').textContent = (params.frequency_penalty ?? 0).toFixed(2);
-            document.getElementById('paramMT').value = params.max_tokens ?? 2000;
-            document.getElementById('mtValue').textContent = params.max_tokens ?? 2000;
-        }
+        const allParams = await this.api('/api/generation-params');
+        this._categoryParams = allParams || {};
+        const categories = (window.APP_ROLE_REGISTRY?.model_categories) || [];
+
+        const tabsEl = document.getElementById('paramCategoryTabs');
+        const visibleCats = categories.filter(c => c.id !== 'embedding');
+        tabsEl.innerHTML = visibleCats.map((c, i) =>
+            `<button class="param-cat-tab${i === 0 ? ' active' : ''}" data-cat="${c.id}" onclick="App.switchParamCategory('${c.id}', event)"><i class="fas ${c.icon}"></i> ${c.name}</button>`
+        ).join('');
+
+        if (visibleCats.length > 0) this._renderParamPanel(visibleCats[0].id);
+    },
+
+    switchParamCategory(catId, evt) {
+        document.querySelectorAll('.param-cat-tab').forEach(t => t.classList.remove('active'));
+        if (evt) evt.target.closest('.param-cat-tab').classList.add('active');
+        this._renderParamPanel(catId);
+    },
+
+    _renderParamPanel(catId) {
+        const params = this._categoryParams[catId] || {};
+        this._activeParamCategory = catId;
+        const fields = [
+            {key:'temperature', label:'Temperature', min:0, max:2, step:0.05, desc:'越高越有创意，越低越稳定', isInt:false},
+            {key:'top_p', label:'Top-P', min:0, max:1, step:0.05, desc:'', isInt:false},
+            {key:'presence_penalty', label:'Presence Penalty', min:-2, max:2, step:0.1, desc:'', isInt:false},
+            {key:'frequency_penalty', label:'Frequency Penalty', min:-2, max:2, step:0.1, desc:'', isInt:false},
+            {key:'max_tokens', label:'Max Tokens', min:100, max:16000, step:100, desc:'', isInt:true},
+        ];
+        const defaults = {temperature:0.7, top_p:0.9, presence_penalty:0, frequency_penalty:0, max_tokens:2000};
+        const panel = document.getElementById('paramCategoryPanel');
+        panel.innerHTML = '<div class="param-grid">' + fields.map(f => {
+            const val = params[f.key] ?? defaults[f.key];
+            const display = f.isInt ? val : parseFloat(val).toFixed(2);
+            return `<div class="param-item">
+                <label>${f.label} <span class="param-value" id="pv_${catId}_${f.key}">${display}</span></label>
+                <input type="range" min="${f.min}" max="${f.max}" step="${f.step}" value="${val}"
+                    oninput="App._onParamSliderChange(this,'${catId}','${f.key}',${f.isInt})">
+                ${f.desc ? '<div class="param-desc">' + f.desc + '</div>' : ''}
+            </div>`;
+        }).join('') + '</div>';
+    },
+
+    _onParamSliderChange(input, catId, key, isInt) {
+        const val = isInt ? parseInt(input.value) : parseFloat(input.value);
+        const display = isInt ? val : val.toFixed(2);
+        document.getElementById('pv_' + catId + '_' + key).textContent = display;
+        if (!this._categoryParams[catId]) this._categoryParams[catId] = {};
+        this._categoryParams[catId][key] = val;
     },
 
     async saveGenParams() {
-        const data = {
-            temperature: parseFloat(document.getElementById('paramTemp').value),
-            top_p: parseFloat(document.getElementById('paramTopP').value),
-            presence_penalty: parseFloat(document.getElementById('paramPP').value),
-            frequency_penalty: parseFloat(document.getElementById('paramFP').value),
-            max_tokens: parseInt(document.getElementById('paramMT').value),
-        };
-        await this.api('/api/generation-params', 'POST', data);
-        this.toast('生成参数已保存', 'success');
+        const catId = this._activeParamCategory;
+        if (!catId) return;
+        const p = this._categoryParams[catId] || {};
+        await this.api('/api/generation-params', 'POST', {
+            category: catId,
+            temperature: p.temperature ?? 0.7,
+            top_p: p.top_p ?? 0.9,
+            presence_penalty: p.presence_penalty ?? 0,
+            frequency_penalty: p.frequency_penalty ?? 0,
+            max_tokens: p.max_tokens ?? 2000,
+        });
+        const catLabels = {generative:'生成型',reasoning:'推理型',economic:'经济型'};
+        this.toast((catLabels[catId] || catId) + ' 参数已保存', 'success');
     },
 
     async loadTokenStats() {

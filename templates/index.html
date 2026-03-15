@@ -1026,9 +1026,18 @@
 
                 <!-- 模型管理 -->
                 <div class="settings-content active" id="settingsModels">
-                    <div class="settings-toolbar">
-                        <button class="btn btn-sm btn-primary" onclick="App.addModel()">
-                            <i class="fas fa-plus"></i> 添加模型
+                    <div class="settings-toolbar" style="gap:6px;flex-wrap:wrap;">
+                        <button class="btn btn-sm btn-primary" onclick="App.addModel('generative')">
+                            <i class="fas fa-pen-fancy"></i> 添加生成型
+                        </button>
+                        <button class="btn btn-sm btn-primary" onclick="App.addModel('reasoning')">
+                            <i class="fas fa-brain"></i> 添加推理型
+                        </button>
+                        <button class="btn btn-sm btn-primary" onclick="App.addModel('economic')">
+                            <i class="fas fa-bolt"></i> 添加经济型
+                        </button>
+                        <button class="btn btn-sm btn-ghost" onclick="App.addModel()">
+                            <i class="fas fa-plus"></i> 自定义
                         </button>
                     </div>
                     <div class="model-list" id="modelList"></div>
@@ -1042,6 +1051,17 @@
                                 <input type="text" id="modelName" placeholder="如: GPT-4o">
                             </div>
                             <div class="form-group">
+                                <label>模型类别</label>
+                                <select id="modelType">
+                                    <option value="generative">生成型（执笔/续写/润色）</option>
+                                    <option value="reasoning">校验推理型（验证/检测/抽取）</option>
+                                    <option value="economic">经济型（摘要/补全）</option>
+                                    <option value="embedding">Embedding</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
                                 <label>提供商</label>
                                 <select id="modelProvider">
                                     <option value="openai">OpenAI / 兼容</option>
@@ -1050,6 +1070,10 @@
                                     <option value="vllm">vLLM</option>
                                     <option value="other">其他</option>
                                 </select>
+                            </div>
+                            <div class="form-group">
+                                <label>模型标识</label>
+                                <input type="text" id="modelModelId" placeholder="gpt-4o">
                             </div>
                         </div>
                         <div class="form-group">
@@ -1060,15 +1084,9 @@
                             <label>API Key</label>
                             <input type="password" id="modelApiKey" placeholder="sk-...">
                         </div>
-                        <div class="form-row">
-                            <div class="form-group">
-                                <label>模型标识</label>
-                                <input type="text" id="modelModelId" placeholder="gpt-4o">
-                            </div>
-                            <div class="form-group">
-                                <label>最大上下文</label>
-                                <input type="number" id="modelMaxCtx" value="8192">
-                            </div>
+                        <div class="form-group">
+                            <label>最大上下文</label>
+                            <input type="number" id="modelMaxCtx" value="8192">
                         </div>
                         <div class="form-actions">
                             <button class="btn btn-primary" onclick="App.saveModel()">保存</button>
@@ -1079,7 +1097,7 @@
 
                 <!-- 任务路由 -->
                 <div class="settings-content" id="settingsRouting">
-                    <p class="settings-hint">为不同的 Agent 角色分配专用模型（如：推理型用于规划，文学型用于创作）</p>
+                    <p class="settings-hint">为不同的 Agent 角色分配专用模型。未手动指定的角色会自动使用同类别模型。</p>
                     <div class="routing-grid" id="routingGrid"></div>
                     <button class="btn btn-primary" onclick="App.saveRouting()">
                         <i class="fas fa-save"></i> 保存路由配置
@@ -1088,36 +1106,11 @@
 
                 <!-- 生成参数 -->
                 <div class="settings-content" id="settingsParams">
-                    <div class="param-grid">
-                        <div class="param-item">
-                            <label>Temperature <span class="param-value" id="tempValue">0.70</span></label>
-                            <input type="range" id="paramTemp" min="0" max="2" step="0.05" value="0.7"
-                                   oninput="document.getElementById('tempValue').textContent=parseFloat(this.value).toFixed(2)">
-                            <div class="param-desc">越高越有创意，越低越稳定</div>
-                        </div>
-                        <div class="param-item">
-                            <label>Top-P <span class="param-value" id="topPValue">0.90</span></label>
-                            <input type="range" id="paramTopP" min="0" max="1" step="0.05" value="0.9"
-                                   oninput="document.getElementById('topPValue').textContent=parseFloat(this.value).toFixed(2)">
-                        </div>
-                        <div class="param-item">
-                            <label>Presence Penalty <span class="param-value" id="ppValue">0.00</span></label>
-                            <input type="range" id="paramPP" min="-2" max="2" step="0.1" value="0"
-                                   oninput="document.getElementById('ppValue').textContent=parseFloat(this.value).toFixed(2)">
-                        </div>
-                        <div class="param-item">
-                            <label>Frequency Penalty <span class="param-value" id="fpValue">0.00</span></label>
-                            <input type="range" id="paramFP" min="-2" max="2" step="0.1" value="0"
-                                   oninput="document.getElementById('fpValue').textContent=parseFloat(this.value).toFixed(2)">
-                        </div>
-                        <div class="param-item">
-                            <label>Max Tokens <span class="param-value" id="mtValue">2000</span></label>
-                            <input type="range" id="paramMT" min="100" max="16000" step="100" value="2000"
-                                   oninput="document.getElementById('mtValue').textContent=this.value">
-                        </div>
-                    </div>
+                    <p class="settings-hint">为不同模型类别独立调节生成参数（生成型追求创意，推理型追求精度，经济型控制成本）</p>
+                    <div class="param-category-tabs" id="paramCategoryTabs"></div>
+                    <div class="param-category-panel" id="paramCategoryPanel"></div>
                     <button class="btn btn-primary" onclick="App.saveGenParams()">
-                        <i class="fas fa-save"></i> 保存参数
+                        <i class="fas fa-save"></i> 保存当前类别参数
                     </button>
                 </div>
 

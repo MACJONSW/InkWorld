@@ -176,6 +176,7 @@ class Database:
             api_key_enc TEXT NOT NULL,
             model_id TEXT NOT NULL,
             max_context INTEGER DEFAULT 8192,
+            model_type TEXT DEFAULT 'generative',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )''')
@@ -384,6 +385,19 @@ class Database:
             presence_penalty REAL DEFAULT 0.0,
             frequency_penalty REAL DEFAULT 0.0,
             max_tokens INTEGER DEFAULT 2000,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )''')
+
+        # 用户级分类生成参数（按模型类别独立配置）
+        c.execute('''CREATE TABLE IF NOT EXISTS user_category_generation_params (
+            user_id TEXT NOT NULL,
+            category TEXT NOT NULL,
+            temperature REAL DEFAULT 0.7,
+            top_p REAL DEFAULT 0.9,
+            presence_penalty REAL DEFAULT 0.0,
+            frequency_penalty REAL DEFAULT 0.0,
+            max_tokens INTEGER DEFAULT 2000,
+            PRIMARY KEY (user_id, category),
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
         )''')
 
@@ -778,6 +792,9 @@ class Database:
         # 伏笔表增强：回填字段
         self._ensure_column(conn, 'foreshadowing', 'payoff_type', 'TEXT')
         self._ensure_column(conn, 'foreshadowing', 'payoff_evidence', 'TEXT DEFAULT ""')
+
+        # 模型类别迁移
+        self._ensure_column(conn, 'models', 'model_type', "TEXT DEFAULT 'generative'")
 
         # 检索索引（FTS5）
         self._setup_search_index(conn)
@@ -1175,11 +1192,12 @@ class Database:
     def add_model(self, data, user_id):
         mid = str(uuid.uuid4())[:8]
         conn = self._conn()
-        conn.execute('''INSERT INTO models (id, user_id, name, provider, base_url, api_key_enc, model_id, max_context)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+        conn.execute('''INSERT INTO models (id, user_id, name, provider, base_url, api_key_enc, model_id, max_context, model_type)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                      (mid, user_id, data.get('name', ''), data.get('provider', 'openai'),
                       data.get('base_url', ''), encrypt(data.get('api_key', '')),
-                      data.get('model_id', ''), data.get('max_context', 8192)))
+                      data.get('model_id', ''), data.get('max_context', 8192),
+                      data.get('model_type', 'generative')))
         conn.commit()
         conn.close()
         return mid
@@ -1188,7 +1206,7 @@ class Database:
         conn = self._conn()
         fields = []
         vals = []
-        for k in ['name', 'provider', 'base_url', 'model_id', 'max_context']:
+        for k in ['name', 'provider', 'base_url', 'model_id', 'max_context', 'model_type']:
             if k in data:
                 fields.append(f'{k}=?')
                 vals.append(data[k])
@@ -1232,9 +1250,28 @@ class Database:
             conn.close()
             return model
         conn.close()
-        # Fallback: return first model for current user
-        models = self.get_all_models(user_id)
+        # Fallback: 按角色类别查找同类模型
+        from role_registry import ROLE_CATEGORY_MAP
+        category = ROLE_CATEGORY_MAP.get(role, 'generative')
+        models = self._get_all_models_internal(user_id)
+        # 优先返回同类别模型
+        for m in models:
+            if m.get('model_type') == category:
+                return m
+        # 最终回退：返回第一个模型
         return models[0] if models else None
+
+    def _get_all_models_internal(self, user_id):
+        """内部用：返回所有模型(含完整 api_key)"""
+        conn = self._conn()
+        rows = conn.execute('SELECT * FROM models WHERE user_id=? ORDER BY created_at ASC', (user_id,)).fetchall()
+        conn.close()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d['api_key'] = decrypt(d.pop('api_key_enc', ''))
+            result.append(d)
+        return result
 
     # ============== 生成参数 ==============
 
@@ -1258,6 +1295,57 @@ class Database:
                         (user_id, temperature, top_p, presence_penalty, frequency_penalty, max_tokens)
                         VALUES (?, ?, ?, ?, ?, ?)''',
                      (user_id, data.get('temperature', 0.7), data.get('top_p', 0.9),
+                      data.get('presence_penalty', 0.0), data.get('frequency_penalty', 0.0),
+                      data.get('max_tokens', 2000)))
+        conn.commit()
+        conn.close()
+
+    # ============== 分类生成参数 ==============
+
+    def get_generation_params_by_category(self, user_id, category):
+        conn = self._conn()
+        row = conn.execute(
+            'SELECT * FROM user_category_generation_params WHERE user_id=? AND category=?',
+            (user_id, category)
+        ).fetchone()
+        conn.close()
+        if row:
+            return dict(row)
+        from role_registry import CATEGORY_PARAM_DEFAULTS
+        defaults = CATEGORY_PARAM_DEFAULTS.get(category, {})
+        return {
+            'temperature': defaults.get('temperature', 0.7),
+            'top_p': defaults.get('top_p', 0.9),
+            'presence_penalty': defaults.get('presence_penalty', 0.0),
+            'frequency_penalty': defaults.get('frequency_penalty', 0.0),
+            'max_tokens': defaults.get('max_tokens', 2000),
+        }
+
+    def get_all_category_generation_params(self, user_id):
+        conn = self._conn()
+        rows = conn.execute(
+            'SELECT * FROM user_category_generation_params WHERE user_id=?',
+            (user_id,)
+        ).fetchall()
+        conn.close()
+        from role_registry import CATEGORY_PARAM_DEFAULTS
+        saved = {r['category']: dict(r) for r in rows}
+        result = {}
+        for cat, defaults in CATEGORY_PARAM_DEFAULTS.items():
+            if cat in saved:
+                result[cat] = saved[cat]
+            else:
+                result[cat] = dict(defaults)
+                result[cat]['category'] = cat
+        return result
+
+    def set_generation_params_by_category(self, user_id, category, data):
+        conn = self._conn()
+        conn.execute('''INSERT OR REPLACE INTO user_category_generation_params
+                        (user_id, category, temperature, top_p, presence_penalty, frequency_penalty, max_tokens)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                     (user_id, category,
+                      data.get('temperature', 0.7), data.get('top_p', 0.9),
                       data.get('presence_penalty', 0.0), data.get('frequency_penalty', 0.0),
                       data.get('max_tokens', 2000)))
         conn.commit()
