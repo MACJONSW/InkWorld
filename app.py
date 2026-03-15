@@ -39,6 +39,7 @@ from disambiguation_engine import DisambiguationEngine
 from knowledge_graph_engine import KnowledgeGraphEngine
 from foreshadow_engine import ForeshadowEngine
 from narrative_engine import NarrativeEngine
+from role_registry import get_frontend_role_registry, get_routing_role_ids
 
 
 def _get_jwt_secret():
@@ -83,6 +84,32 @@ knowledge_graph_engine = KnowledgeGraphEngine(db)
 foreshadow_engine = ForeshadowEngine(db)
 narrative_engine = NarrativeEngine(db)
 db.init_db()
+
+
+def _refresh_retrieval_artifacts(event):
+    book_id = event.get('book_id')
+    source_type = event.get('source_type')
+    source_id = event.get('source_id')
+    if not book_id or not source_type or not source_id:
+        return
+
+    try:
+        memory_engine.refresh_retrieval_index(book_id, source_type=source_type, source_id=source_id)
+    except Exception:
+        pass
+
+    try:
+        if not db.get_embedding_index_meta(book_id):
+            return
+        user_id = db.get_book_owner(book_id)
+        if not user_id:
+            return
+        embedding_engine.incremental_update(book_id, user_id, source_type, source_id)
+    except Exception:
+        pass
+
+
+db.register_mutation_listener(_refresh_retrieval_artifacts)
 
 # P0: 注入摘要回调，让 MemoryEngine 在无摘要时自动触发 LLM 摘要
 def _summarizer_callback(book_id, node_id, chapter_title, text):
@@ -299,7 +326,12 @@ def _prepare_agent_data():
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    return render_template('index.html', role_registry=get_frontend_role_registry())
+
+
+@app.route('/api/meta/roles', methods=['GET'])
+def get_role_registry():
+    return jsonify(get_frontend_role_registry())
 
 
 # ===================== 认证 API =====================
@@ -378,6 +410,10 @@ def get_routing():
 @app.route('/api/routing', methods=['POST'])
 def set_routing():
     data = _json_body()
+    allowed_roles = get_routing_role_ids()
+    invalid_roles = sorted(set(data.keys()) - allowed_roles)
+    if invalid_roles:
+        return jsonify({'error': 'invalid_roles', 'roles': invalid_roles}), 400
     db.set_routing(data, g.user_id)
     return jsonify({'status': 'ok'})
 

@@ -258,42 +258,7 @@
                         <i class="fas fa-magic"></i> <span id="autocompleteStatus">思考中...</span>
                     </div>
                     <!-- 行内指令菜单 -->
-                    <div class="slash-menu" id="slashMenu" style="display:none;">
-                        <div class="slash-menu-item" onclick="App.execSlash('continue')">
-                            <i class="fas fa-pen-fancy"></i> 续写
-                        </div>
-                        <div class="slash-menu-item" onclick="App.execSlash('rewrite')">
-                            <i class="fas fa-rotate"></i> 改写本段
-                        </div>
-                        <div class="slash-menu-item" onclick="App.execSlash('expand_env')">
-                            <i class="fas fa-mountain-sun"></i> 扩写环境
-                        </div>
-                        <div class="slash-menu-item" onclick="App.execSlash('simplify_dialogue')">
-                            <i class="fas fa-comment-dots"></i> 精简对话
-                        </div>
-                        <div class="slash-menu-item" onclick="App.execSlash('add_tension')">
-                            <i class="fas fa-bolt"></i> 增加紧张感
-                        </div>
-                        <div class="slash-menu-item" onclick="App.execSlash('inner_monologue')">
-                            <i class="fas fa-brain"></i> 内心独白
-                        </div>
-                        <div class="slash-menu-divider"></div>
-                        <div class="slash-menu-item" onclick="App.execSlash('smart_continue')">
-                            <i class="fas fa-forward"></i> 智能续写
-                        </div>
-                        <div class="slash-menu-item" onclick="App.triggerConflictDesign()">
-                            <i class="fas fa-fire"></i> 冲突设计
-                        </div>
-                        <div class="slash-menu-item" onclick="App.triggerBrainstorm()">
-                            <i class="fas fa-lightbulb"></i> 联想风暴
-                        </div>
-                        <div class="slash-menu-item" onclick="App.triggerPlanAndSolve()">
-                            <i class="fas fa-layer-group"></i> Plan模式
-                        </div>
-                        <div class="slash-menu-item" onclick="App.triggerHallucinationCheck()">
-                            <i class="fas fa-shield-halved"></i> 幻觉检测
-                        </div>
-                    </div>
+                    <div class="slash-menu" id="slashMenu" style="display:none;"></div>
                 </div>
             </div>
 
@@ -352,88 +317,23 @@
                     <div class="fold-section-body" id="foldBody-agent-workbench">
                         <!-- Agent 选择 - 分组标签页 -->
                         <div class="agent-group-tabs">
-                            <button class="agent-group-tab active" data-group="planning" onclick="App.switchAgentGroup('planning', event)">
-                                规划
+                            {% for group in role_registry.agent_groups %}
+                            <button class="agent-group-tab{% if loop.first %} active{% endif %}" data-group="{{ group.id }}" onclick="App.switchAgentGroup('{{ group.id }}', event)">
+                                {{ group.name }}
                             </button>
-                            <button class="agent-group-tab" data-group="writing" onclick="App.switchAgentGroup('writing', event)">
-                                写作
-                            </button>
-                            <button class="agent-group-tab" data-group="validation" onclick="App.switchAgentGroup('validation', event)">
-                                校验
-                            </button>
-                            <button class="agent-group-tab" data-group="analysis" onclick="App.switchAgentGroup('analysis', event)">
-                                分析
-                            </button>
+                            {% endfor %}
                         </div>
                         <div class="agent-selector">
-                            <!-- 规划类 -->
-                            <div class="agent-group active" data-group="planning">
-                            <button class="agent-btn active" data-agent="planner" onclick="App.selectAgent('planner')">
-                                <i class="fas fa-sitemap"></i>
-                                <span>架构师</span>
-                            </button>
-                            <button class="agent-btn" data-agent="beats" onclick="App.selectAgent('beats')">
-                                <i class="fas fa-music"></i>
-                                <span>节拍器</span>
-                            </button>
-                            <button class="agent-btn" data-agent="conflict" onclick="App.selectAgent('conflict')">
-                                <i class="fas fa-fire"></i>
-                                <span>冲突</span>
-                            </button>
-                            <button class="agent-btn" data-agent="brainstorm" onclick="App.selectAgent('brainstorm')">
-                                <i class="fas fa-lightbulb"></i>
-                                <span>联想</span>
-                            </button>
+                            {% for group in role_registry.agent_groups %}
+                            <div class="agent-group{% if loop.first %} active{% endif %}" data-group="{{ group.id }}">
+                                {% for agent in role_registry.agents if agent.group == group.id %}
+                                <button class="agent-btn{% if loop.first and group.id == role_registry.agent_groups[0].id %} active{% endif %}" data-agent="{{ agent.id }}" onclick="App.selectAgent('{{ agent.id }}')">
+                                    <i class="fas {{ agent.icon }}"></i>
+                                    <span>{{ agent.name }}</span>
+                                </button>
+                                {% endfor %}
                             </div>
-                            <!-- 写作类 -->
-                            <div class="agent-group" data-group="writing">
-                            <button class="agent-btn" data-agent="drafter" onclick="App.selectAgent('drafter')">
-                                <i class="fas fa-pen-nib"></i>
-                                <span>执笔者</span>
-                            </button>
-                            <button class="agent-btn" data-agent="continuation" onclick="App.selectAgent('continuation')">
-                                <i class="fas fa-forward"></i>
-                                <span>续写</span>
-                            </button>
-                            <button class="agent-btn" data-agent="polisher" onclick="App.selectAgent('polisher')">
-                                <i class="fas fa-gem"></i>
-                                <span>润色</span>
-                            </button>
-                            <button class="agent-btn" data-agent="plansolve" onclick="App.selectAgent('plansolve')">
-                                <i class="fas fa-layer-group"></i>
-                                <span>Plan模式</span>
-                            </button>
-                            </div>
-                            <!-- 校验类 -->
-                            <div class="agent-group" data-group="validation">
-                            <button class="agent-btn" data-agent="validator" onclick="App.selectAgent('validator')">
-                                <i class="fas fa-check-double"></i>
-                                <span>验证者</span>
-                            </button>
-                            <button class="agent-btn" data-agent="hallcheck" onclick="App.selectAgent('hallcheck')">
-                                <i class="fas fa-shield-halved"></i>
-                                <span>幻觉检测</span>
-                            </button>
-                            <button class="agent-btn" data-agent="worldstate" onclick="App.selectAgent('worldstate')">
-                                <i class="fas fa-globe"></i>
-                                <span>世界态</span>
-                            </button>
-                            <button class="agent-btn" data-agent="foreshadow" onclick="App.selectAgent('foreshadow')">
-                                <i class="fas fa-eye"></i>
-                                <span>伏笔</span>
-                            </button>
-                            </div>
-                            <!-- 分析类 -->
-                            <div class="agent-group" data-group="analysis">
-                            <button class="agent-btn" data-agent="subtext" onclick="App.selectAgent('subtext')">
-                                <i class="fas fa-masks-theater"></i>
-                                <span>潜台词</span>
-                            </button>
-                            <button class="agent-btn" data-agent="psychology" onclick="App.selectAgent('psychology')">
-                                <i class="fas fa-brain"></i>
-                                <span>心理</span>
-                            </button>
-                            </div>
+                            {% endfor %}
                         </div>
 
                         <!-- 各Agent面板 -->
@@ -1675,7 +1575,47 @@
         </div>
     </div>
 
+    <!-- ========== 通用表单弹层 ========== -->
+    <div class="modal-overlay" id="formDialogModal" style="display:none;">
+        <div class="modal modal-sm">
+            <div class="modal-header">
+                <h3 id="formDialogTitle">新建</h3>
+                <button class="btn btn-ghost modal-close" onclick="App.cancelFormDialog()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="settings-hint" id="formDialogDescription" style="display:none;"></p>
+                <div id="formDialogFields"></div>
+                <div class="form-actions">
+                    <button class="btn btn-primary" id="formDialogSubmit" onclick="App.submitFormDialog()">确认</button>
+                    <button class="btn btn-ghost" onclick="App.cancelFormDialog()">取消</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========== 通用确认弹层 ========== -->
+    <div class="modal-overlay" id="confirmDialogModal" style="display:none;">
+        <div class="modal modal-sm">
+            <div class="modal-header">
+                <h3 id="confirmDialogTitle">请确认</h3>
+                <button class="btn btn-ghost modal-close" onclick="App.cancelConfirmDialog()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="settings-hint" id="confirmDialogMessage"></p>
+                <div class="form-actions">
+                    <button class="btn btn-danger" id="confirmDialogConfirmBtn" onclick="App.acceptConfirmDialog()">确认</button>
+                    <button class="btn btn-ghost" id="confirmDialogCancelBtn" onclick="App.cancelConfirmDialog()">取消</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        window.APP_ROLE_REGISTRY = {{ role_registry | tojson }};
+    </script>
     <script src="https://unpkg.com/vis-network@9/standalone/umd/vis-network.min.js"></script>
     <script src="/static/js/app.js"></script>
+    <script src="/static/js/app.ai.js"></script>
+    <script src="/static/js/app.tools.js"></script>
 </body>
 </html>

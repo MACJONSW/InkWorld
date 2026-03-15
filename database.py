@@ -6,6 +6,7 @@ import json
 import uuid
 import os
 import time
+import re
 from datetime import datetime
 from cryptography.fernet import Fernet
 
@@ -60,6 +61,8 @@ class Database:
     def __init__(self):
         self.db_path = DB_PATH
         self._engine = None
+        self._mutation_listeners = []
+        self._fts5_enabled = False
         if HAS_SQLALCHEMY:
             db_url = f"sqlite:///{self.db_path}"
             self._engine = create_engine(
@@ -92,6 +95,64 @@ class Database:
         cols = [r[1] for r in conn.execute(f'PRAGMA table_info({table})').fetchall()]
         if column not in cols:
             conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
+
+    def register_mutation_listener(self, listener):
+        if callable(listener):
+            self._mutation_listeners.append(listener)
+
+    def _emit_mutation(self, payload):
+        for listener in list(self._mutation_listeners):
+            try:
+                listener(dict(payload))
+            except Exception:
+                continue
+
+    def _table_exists(self, conn, table_name):
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name=?",
+            (table_name,)
+        ).fetchone()
+        return bool(row)
+
+    def search_index_enabled(self):
+        return self._fts5_enabled
+
+    def _setup_search_index(self, conn):
+        try:
+            conn.execute(
+                '''CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
+                    book_id UNINDEXED,
+                    source_type UNINDEXED,
+                    source_id UNINDEXED,
+                    title,
+                    body,
+                    meta UNINDEXED,
+                    tokenize='unicode61'
+                )'''
+            )
+            self._fts5_enabled = True
+        except sqlite3.OperationalError:
+            self._fts5_enabled = False
+
+    def _bootstrap_search_index(self):
+        if not self._fts5_enabled:
+            return
+        conn = self._conn()
+        try:
+            if not self._table_exists(conn, 'search_index'):
+                return
+            row = conn.execute('SELECT COUNT(*) AS cnt FROM search_index').fetchone()
+            if row and row['cnt'] > 0:
+                return
+            book_rows = conn.execute('SELECT id FROM books').fetchall()
+            conn.close()
+            for row in book_rows:
+                self.rebuild_search_index_for_book(row['id'])
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     def init_db(self):
         conn = self._conn()
@@ -718,9 +779,344 @@ class Database:
         self._ensure_column(conn, 'foreshadowing', 'payoff_type', 'TEXT')
         self._ensure_column(conn, 'foreshadowing', 'payoff_evidence', 'TEXT DEFAULT ""')
 
+        # 检索索引（FTS5）
+        self._setup_search_index(conn)
+
         # 初始化默认生成参数
         c.execute('INSERT OR IGNORE INTO generation_params (id) VALUES (1)')
 
+        conn.commit()
+        conn.close()
+        self._bootstrap_search_index()
+
+    # ============== 检索索引（FTS5） ==============
+
+    def _json_meta(self, payload):
+        return json.dumps(payload or {}, ensure_ascii=False)
+
+    def _loads_meta(self, value):
+        if not value:
+            return {}
+        try:
+            return json.loads(value)
+        except Exception:
+            return {}
+
+    def _normalize_search_document(self, book_id, source_type, source_id, title='', body='', meta=None):
+        return {
+            'book_id': book_id,
+            'source_type': source_type,
+            'source_id': source_id,
+            'title': title or '',
+            'body': body or '',
+            'meta': dict(meta or {}),
+        }
+
+    def upsert_search_document(self, book_id, source_type, source_id, title='', body='', meta=None, conn=None):
+        if not self._fts5_enabled or not book_id or not source_id:
+            return
+        payload = self._normalize_search_document(book_id, source_type, source_id, title, body, meta)
+        own_conn = conn is None
+        conn = conn or self._conn()
+        conn.execute(
+            'DELETE FROM search_index WHERE book_id=? AND source_type=? AND source_id=?',
+            (book_id, source_type, source_id)
+        )
+        if payload['title'].strip() or payload['body'].strip():
+            conn.execute(
+                '''INSERT INTO search_index (book_id, source_type, source_id, title, body, meta)
+                   VALUES (?, ?, ?, ?, ?, ?)''',
+                (
+                    payload['book_id'],
+                    payload['source_type'],
+                    payload['source_id'],
+                    payload['title'],
+                    payload['body'],
+                    self._json_meta(payload['meta']),
+                )
+            )
+        if own_conn:
+            conn.commit()
+            conn.close()
+
+    def delete_search_documents(self, book_id, source_type=None, source_id=None, conn=None):
+        if not self._fts5_enabled or not book_id:
+            return
+        own_conn = conn is None
+        conn = conn or self._conn()
+        if source_id:
+            conn.execute(
+                'DELETE FROM search_index WHERE book_id=? AND source_type=? AND source_id=?',
+                (book_id, source_type, source_id)
+            )
+        elif source_type:
+            conn.execute(
+                'DELETE FROM search_index WHERE book_id=? AND source_type=?',
+                (book_id, source_type)
+            )
+        else:
+            conn.execute('DELETE FROM search_index WHERE book_id=?', (book_id,))
+        if own_conn:
+            conn.commit()
+            conn.close()
+
+    def _prepare_fts_query(self, query):
+        tokens = [token.strip() for token in re.split(r'\s+', (query or '').strip()) if token.strip()]
+        if not tokens:
+            return ''
+        return ' AND '.join([f'"{token.replace(chr(34), chr(34) * 2)}"' for token in tokens])
+
+    def search_documents(self, book_id, query, scope=None, limit=50):
+        if not self._fts5_enabled or not book_id or not (query or '').strip():
+            return []
+        match_query = self._prepare_fts_query(query)
+        if not match_query:
+            return []
+        source_types = None
+        if scope:
+            source_types = [scope]
+        sql = '''
+            SELECT source_type, source_id, title, meta,
+                   snippet(search_index, 4, '[', ']', '...', 12) AS excerpt
+            FROM search_index
+            WHERE book_id=? AND search_index MATCH ?
+        '''
+        params = [book_id, match_query]
+        if source_types:
+            placeholders = ','.join(['?'] * len(source_types))
+            sql += f' AND source_type IN ({placeholders})'
+            params.extend(source_types)
+        sql += ' ORDER BY rank LIMIT ?'
+        params.append(int(limit))
+        conn = self._conn()
+        try:
+            rows = conn.execute(sql, tuple(params)).fetchall()
+        except sqlite3.OperationalError:
+            conn.close()
+            return []
+        conn.close()
+        docs = []
+        for row in rows:
+            item = dict(row)
+            item['meta'] = self._loads_meta(item.get('meta'))
+            docs.append(item)
+        return docs
+
+    def _get_search_content_document(self, source_id):
+        conn = self._conn()
+        row = conn.execute(
+            '''SELECT n.book_id, n.id, n.title, n.type, nc.content
+               FROM nodes n
+               LEFT JOIN node_contents nc ON nc.node_id = n.id
+               WHERE n.id=?''',
+            (source_id,)
+        ).fetchone()
+        conn.close()
+        if not row:
+            return None
+        item = dict(row)
+        return self._normalize_search_document(
+            item['book_id'],
+            'content',
+            item['id'],
+            title=item.get('title', ''),
+            body=decrypt(item.get('content', '') or ''),
+            meta={'node_type': item.get('type', 'chapter')}
+        )
+
+    def _get_search_summary_document(self, source_id):
+        conn = self._conn()
+        row = conn.execute('SELECT * FROM chapter_summaries WHERE id=?', (source_id,)).fetchone()
+        conn.close()
+        if not row:
+            return None
+        item = dict(row)
+        chapter_title = decrypt(item.get('chapter_title', ''))
+        summary = decrypt(item.get('summary', ''))
+        key_events = decrypt(item.get('key_events', ''))
+        return self._normalize_search_document(
+            item['book_id'],
+            'summary',
+            item['id'],
+            title=chapter_title,
+            body='\n'.join([part for part in [summary, key_events] if part]),
+            meta={'node_id': item.get('node_id', ''), 'chapter_title': chapter_title}
+        )
+
+    def _get_search_lorebook_document(self, source_id):
+        conn = self._conn()
+        row = conn.execute('SELECT * FROM lorebook WHERE id=?', (source_id,)).fetchone()
+        conn.close()
+        if not row:
+            return None
+        item = dict(row)
+        description = decrypt(item.get('description', ''))
+        keywords = decrypt(item.get('keywords', ''))
+        content = decrypt(item.get('content', ''))
+        body = '\n'.join([part for part in [description, content, keywords] if part])
+        return self._normalize_search_document(
+            item['book_id'],
+            'lorebook',
+            item['id'],
+            title=item.get('name', ''),
+            body=body,
+            meta={'category': item.get('category', ''), 'keywords': keywords}
+        )
+
+    def _get_search_character_history_document(self, source_id):
+        conn = self._conn()
+        row = conn.execute('SELECT * FROM character_history WHERE id=?', (source_id,)).fetchone()
+        conn.close()
+        if not row:
+            return None
+        item = dict(row)
+        summary = decrypt(item.get('summary', ''))
+        details = decrypt(item.get('details', ''))
+        chapter_title = decrypt(item.get('chapter_title', ''))
+        source_excerpt = decrypt(item.get('source_excerpt', ''))
+        return self._normalize_search_document(
+            item['book_id'],
+            'character_history',
+            item['id'],
+            title=item.get('character_name', ''),
+            body='\n'.join([part for part in [summary, details, source_excerpt] if part]),
+            meta={
+                'character_name': item.get('character_name', ''),
+                'chapter_title': chapter_title,
+                'entry_type': item.get('entry_type', 'event'),
+            }
+        )
+
+    def _get_search_world_state_document(self, source_id):
+        conn = self._conn()
+        row = conn.execute('SELECT * FROM world_state WHERE id=?', (source_id,)).fetchone()
+        conn.close()
+        if not row:
+            return None
+        item = dict(row)
+        state_value = decrypt(item.get('state_value', ''))
+        scene_context = decrypt(item.get('scene_context', ''))
+        body = '\n'.join([
+            part for part in [item.get('entity_name', ''), state_value, scene_context] if part
+        ])
+        return self._normalize_search_document(
+            item['book_id'],
+            'world_state',
+            item['id'],
+            title=item.get('entity_name', ''),
+            body=body,
+            meta={'state_type': item.get('state_type', ''), 'state_value': state_value}
+        )
+
+    def _get_search_foreshadowing_document(self, source_id):
+        conn = self._conn()
+        row = conn.execute('SELECT * FROM foreshadowing WHERE id=?', (source_id,)).fetchone()
+        conn.close()
+        if not row:
+            return None
+        item = dict(row)
+        label = decrypt(item.get('label', ''))
+        text = decrypt(item.get('text', ''))
+        description = decrypt(item.get('description', ''))
+        resolved_text = decrypt(item.get('resolved_text', ''))
+        return self._normalize_search_document(
+            item['book_id'],
+            'foreshadowing',
+            item['id'],
+            title=label,
+            body='\n'.join([part for part in [text, description, resolved_text] if part]),
+            meta={'status': item.get('status', 'unresolved'), 'node_id': item.get('node_id', '')}
+        )
+
+    def get_search_document(self, source_type, source_id):
+        getters = {
+            'content': self._get_search_content_document,
+            'summary': self._get_search_summary_document,
+            'lorebook': self._get_search_lorebook_document,
+            'character_history': self._get_search_character_history_document,
+            'world_state': self._get_search_world_state_document,
+            'foreshadowing': self._get_search_foreshadowing_document,
+        }
+        getter = getters.get(source_type)
+        if not getter or not source_id:
+            return None
+        return getter(source_id)
+
+    def sync_search_document(self, source_type, source_id, book_id=None):
+        if not self._fts5_enabled:
+            return False
+        doc = self.get_search_document(source_type, source_id)
+        if not doc:
+            if book_id:
+                self.delete_search_documents(book_id, source_type=source_type, source_id=source_id)
+            return False
+        self.upsert_search_document(
+            doc['book_id'],
+            doc['source_type'],
+            doc['source_id'],
+            title=doc.get('title', ''),
+            body=doc.get('body', ''),
+            meta=doc.get('meta', {}),
+        )
+        return True
+
+    def rebuild_search_index_for_book(self, book_id):
+        if not self._fts5_enabled or not book_id:
+            return
+        conn = self._conn()
+        self.delete_search_documents(book_id, conn=conn)
+        for item in self.get_all_node_contents(book_id):
+            self.upsert_search_document(
+                book_id, 'content', item['id'],
+                title=item.get('title', ''),
+                body=item.get('content', ''),
+                meta={'node_type': item.get('type', 'chapter')},
+                conn=conn,
+            )
+        for item in self.get_chapter_summaries(book_id):
+            self.upsert_search_document(
+                book_id, 'summary', item['id'],
+                title=item.get('chapter_title', ''),
+                body='\n'.join([part for part in [item.get('summary', ''), item.get('key_events', '')] if part]),
+                meta={'node_id': item.get('node_id', ''), 'chapter_title': item.get('chapter_title', '')},
+                conn=conn,
+            )
+        for item in self.get_lorebook_entries(book_id):
+            self.upsert_search_document(
+                book_id, 'lorebook', item['id'],
+                title=item.get('name', ''),
+                body='\n'.join([part for part in [item.get('description', ''), item.get('content', ''), item.get('keywords', '')] if part]),
+                meta={'category': item.get('category', ''), 'keywords': item.get('keywords', '')},
+                conn=conn,
+            )
+        for item in self.get_character_history(book_id):
+            self.upsert_search_document(
+                book_id, 'character_history', item['id'],
+                title=item.get('character_name', ''),
+                body='\n'.join([part for part in [item.get('summary', ''), item.get('details', ''), item.get('source_excerpt', '')] if part]),
+                meta={
+                    'character_name': item.get('character_name', ''),
+                    'chapter_title': item.get('chapter_title', ''),
+                    'entry_type': item.get('entry_type', 'event'),
+                },
+                conn=conn,
+            )
+        for item in self.get_world_state(book_id):
+            self.upsert_search_document(
+                book_id, 'world_state', item['id'],
+                title=item.get('entity_name', ''),
+                body='\n'.join([part for part in [item.get('entity_name', ''), item.get('state_value', ''), item.get('scene_context', '')] if part]),
+                meta={'state_type': item.get('state_type', ''), 'state_value': item.get('state_value', '')},
+                conn=conn,
+            )
+        for item in self.get_foreshadowing(book_id):
+            self.upsert_search_document(
+                book_id, 'foreshadowing', item['id'],
+                title=item.get('label', ''),
+                body='\n'.join([part for part in [item.get('text', ''), item.get('description', ''), item.get('resolved_text', '')] if part]),
+                meta={'status': item.get('status', 'unresolved'), 'node_id': item.get('node_id', '')},
+                conn=conn,
+            )
         conn.commit()
         conn.close()
 
@@ -929,6 +1325,8 @@ class Database:
 
     def delete_book(self, book_id, user_id):
         conn = self._conn()
+        if self._fts5_enabled:
+            self.delete_search_documents(book_id, conn=conn)
         conn.execute('DELETE FROM books WHERE id=? AND user_id=?', (book_id, user_id))
         conn.commit()
         conn.close()
@@ -950,6 +1348,12 @@ class Database:
         row = conn.execute('SELECT id FROM books WHERE id=? AND user_id=?', (book_id, user_id)).fetchone()
         conn.close()
         return bool(row)
+
+    def get_book_owner(self, book_id):
+        conn = self._conn()
+        row = conn.execute('SELECT user_id FROM books WHERE id=?', (book_id,)).fetchone()
+        conn.close()
+        return row['user_id'] if row else None
 
     def node_belongs_to_user(self, node_id, user_id):
         conn = self._conn()
@@ -1013,6 +1417,7 @@ class Database:
         return dict(row) if row else None
 
     def update_node(self, node_id, data):
+        book_id = self.get_node_book_id(node_id)
         conn = self._conn()
         fields = []
         vals = []
@@ -1026,12 +1431,30 @@ class Database:
         conn.execute(f'UPDATE nodes SET {",".join(fields)} WHERE id=?', vals)
         conn.commit()
         conn.close()
+        if book_id and any(key in data for key in ['title', 'type']):
+            self.sync_search_document('content', node_id, book_id=book_id)
+            self._emit_mutation({
+                'book_id': book_id,
+                'source_type': 'content',
+                'source_id': node_id,
+                'reason': 'node_meta_updated',
+            })
 
     def delete_node(self, node_id):
+        book_id = self.get_node_book_id(node_id)
         conn = self._conn()
+        if book_id and self._fts5_enabled:
+            self.delete_search_documents(book_id, source_type='content', source_id=node_id, conn=conn)
         conn.execute('DELETE FROM nodes WHERE id=?', (node_id,))
         conn.commit()
         conn.close()
+        if book_id:
+            self._emit_mutation({
+                'book_id': book_id,
+                'source_type': 'content',
+                'source_id': node_id,
+                'deleted': True,
+            })
 
     def reorder_nodes(self, data):
         conn = self._conn()
@@ -1056,11 +1479,28 @@ class Database:
         word_count = len(content)
         now = datetime.now().isoformat()
         conn = self._conn()
+        row = conn.execute('SELECT book_id, title, type FROM nodes WHERE id=?', (node_id,)).fetchone()
         conn.execute('''INSERT OR REPLACE INTO node_contents (node_id, content, word_count, updated_at)
                         VALUES (?, ?, ?, ?)''', (node_id, encrypt(content), word_count, now))
         conn.execute('UPDATE nodes SET updated_at=? WHERE id=?', (now, node_id))
+        if row and self._fts5_enabled:
+            self.upsert_search_document(
+                row['book_id'],
+                'content',
+                node_id,
+                title=row['title'],
+                body=content,
+                meta={'node_type': row['type']},
+                conn=conn,
+            )
         conn.commit()
         conn.close()
+        if row:
+            self._emit_mutation({
+                'book_id': row['book_id'],
+                'source_type': 'content',
+                'source_id': node_id,
+            })
 
     # ============== 版本 ==============
 
@@ -1093,14 +1533,32 @@ class Database:
         conn.execute('UPDATE versions SET is_active=1 WHERE id=?', (ver_id,))
         # Also update main content
         row = conn.execute('SELECT content FROM versions WHERE id=?', (ver_id,)).fetchone()
+        node_row = conn.execute('SELECT book_id, title, type FROM nodes WHERE id=?', (node_id,)).fetchone()
         if row:
             now = datetime.now().isoformat()
             plain = decrypt(row['content'])
             conn.execute('''INSERT OR REPLACE INTO node_contents (node_id, content, word_count, updated_at)
                             VALUES (?, ?, ?, ?)''', (node_id, row['content'], len(plain), now))
             conn.execute('UPDATE nodes SET updated_at=? WHERE id=?', (now, node_id))
+            if node_row and self._fts5_enabled:
+                self.upsert_search_document(
+                    node_row['book_id'],
+                    'content',
+                    node_id,
+                    title=node_row['title'],
+                    body=plain,
+                    meta={'node_type': node_row['type']},
+                    conn=conn,
+                )
         conn.commit()
         conn.close()
+        if node_row:
+            self._emit_mutation({
+                'book_id': node_row['book_id'],
+                'source_type': 'content',
+                'source_id': node_id,
+                'reason': 'version_activated',
+            })
 
     # ============== Lorebook ==============
 
@@ -1125,11 +1583,23 @@ class Database:
                       data.get('name', ''), encrypt(data.get('description', '')),
                       encrypt(data.get('keywords', '')), encrypt(data.get('content', '')),
                       data.get('enabled', 1), data.get('sort_order', 0)))
+        if self._fts5_enabled:
+            self.upsert_search_document(
+                data['book_id'],
+                'lorebook',
+                eid,
+                title=data.get('name', ''),
+                body='\n'.join([part for part in [data.get('description', ''), data.get('content', ''), data.get('keywords', '')] if part]),
+                meta={'category': data.get('category', 'character'), 'keywords': data.get('keywords', '')},
+                conn=conn,
+            )
         conn.commit()
         conn.close()
+        self._emit_mutation({'book_id': data['book_id'], 'source_type': 'lorebook', 'source_id': eid})
         return eid
 
     def update_lorebook_entry(self, entry_id, data):
+        existing = self.get_search_document('lorebook', entry_id)
         conn = self._conn()
         fields = []
         vals = []
@@ -1142,12 +1612,20 @@ class Database:
         conn.execute(f'UPDATE lorebook SET {",".join(fields)} WHERE id=?', vals)
         conn.commit()
         conn.close()
+        if existing:
+            self.sync_search_document('lorebook', entry_id, book_id=existing['book_id'])
+            self._emit_mutation({'book_id': existing['book_id'], 'source_type': 'lorebook', 'source_id': entry_id})
 
     def delete_lorebook_entry(self, entry_id):
+        existing = self.get_search_document('lorebook', entry_id)
         conn = self._conn()
+        if existing and self._fts5_enabled:
+            self.delete_search_documents(existing['book_id'], source_type='lorebook', source_id=entry_id, conn=conn)
         conn.execute('DELETE FROM lorebook WHERE id=?', (entry_id,))
         conn.commit()
         conn.close()
+        if existing:
+            self._emit_mutation({'book_id': existing['book_id'], 'source_type': 'lorebook', 'source_id': entry_id, 'deleted': True})
 
     # ============== 实体图谱 ==============
 
@@ -1194,8 +1672,19 @@ class Database:
                      (sid, data['book_id'], data.get('node_id', ''),
                       encrypt(data.get('chapter_title', '')), encrypt(data.get('summary', '')),
                       encrypt(data.get('key_events', ''))))
+        if self._fts5_enabled:
+            self.upsert_search_document(
+                data['book_id'],
+                'summary',
+                sid,
+                title=data.get('chapter_title', ''),
+                body='\n'.join([part for part in [data.get('summary', ''), data.get('key_events', '')] if part]),
+                meta={'node_id': data.get('node_id', ''), 'chapter_title': data.get('chapter_title', '')},
+                conn=conn,
+            )
         conn.commit()
         conn.close()
+        self._emit_mutation({'book_id': data['book_id'], 'source_type': 'summary', 'source_id': sid})
         return sid
 
     # ============== 大纲 ==============
@@ -1251,11 +1740,23 @@ class Database:
                       encrypt(data.get('label', '')), encrypt(data.get('description', '')),
                       data.get('status', 'unresolved'), encrypt(data.get('created_chapter', '')),
                       datetime.now().isoformat()))
+        if self._fts5_enabled:
+            self.upsert_search_document(
+                data['book_id'],
+                'foreshadowing',
+                fid,
+                title=data.get('label', ''),
+                body='\n'.join([part for part in [data.get('text', ''), data.get('description', '')] if part]),
+                meta={'status': data.get('status', 'unresolved'), 'node_id': data.get('node_id', '')},
+                conn=conn,
+            )
         conn.commit()
         conn.close()
+        self._emit_mutation({'book_id': data['book_id'], 'source_type': 'foreshadowing', 'source_id': fid})
         return fid
 
     def update_foreshadowing(self, fs_id, data):
+        existing = self.get_search_document('foreshadowing', fs_id)
         conn = self._conn()
         fields = []
         vals = []
@@ -1269,14 +1770,23 @@ class Database:
         conn.execute(f'UPDATE foreshadowing SET {",".join(fields)} WHERE id=?', vals)
         conn.commit()
         conn.close()
+        if existing:
+            self.sync_search_document('foreshadowing', fs_id, book_id=existing['book_id'])
+            self._emit_mutation({'book_id': existing['book_id'], 'source_type': 'foreshadowing', 'source_id': fs_id})
 
     def delete_foreshadowing(self, fs_id):
+        existing = self.get_search_document('foreshadowing', fs_id)
         conn = self._conn()
+        if existing and self._fts5_enabled:
+            self.delete_search_documents(existing['book_id'], source_type='foreshadowing', source_id=fs_id, conn=conn)
         conn.execute('DELETE FROM foreshadowing WHERE id=?', (fs_id,))
         conn.commit()
         conn.close()
+        if existing:
+            self._emit_mutation({'book_id': existing['book_id'], 'source_type': 'foreshadowing', 'source_id': fs_id, 'deleted': True})
 
     def resolve_foreshadowing(self, fs_id, data):
+        existing = self.get_search_document('foreshadowing', fs_id)
         conn = self._conn()
         conn.execute('''UPDATE foreshadowing SET status='resolved', resolved_chapter=?,
                         resolved_node_id=?, resolved_text=? WHERE id=?''',
@@ -1284,6 +1794,9 @@ class Database:
                       encrypt(data.get('resolved_text', '')), fs_id))
         conn.commit()
         conn.close()
+        if existing:
+            self.sync_search_document('foreshadowing', fs_id, book_id=existing['book_id'])
+            self._emit_mutation({'book_id': existing['book_id'], 'source_type': 'foreshadowing', 'source_id': fs_id})
 
     # ============== 世界状态 ==============
 
@@ -1322,15 +1835,31 @@ class Database:
                          (sid, data['book_id'], data['entity_name'], data['state_type'],
                           encrypt(data.get('state_value', '')), encrypt(data.get('scene_context', '')),
                           data.get('last_updated_node', ''), now))
+        if self._fts5_enabled:
+            self.upsert_search_document(
+                data['book_id'],
+                'world_state',
+                sid,
+                title=data.get('entity_name', ''),
+                body='\n'.join([part for part in [data.get('entity_name', ''), data.get('state_value', ''), data.get('scene_context', '')] if part]),
+                meta={'state_type': data.get('state_type', ''), 'state_value': data.get('state_value', '')},
+                conn=conn,
+            )
         conn.commit()
         conn.close()
+        self._emit_mutation({'book_id': data['book_id'], 'source_type': 'world_state', 'source_id': sid})
         return sid
 
     def delete_world_state(self, ws_id):
+        existing = self.get_search_document('world_state', ws_id)
         conn = self._conn()
+        if existing and self._fts5_enabled:
+            self.delete_search_documents(existing['book_id'], source_type='world_state', source_id=ws_id, conn=conn)
         conn.execute('DELETE FROM world_state WHERE id=?', (ws_id,))
         conn.commit()
         conn.close()
+        if existing:
+            self._emit_mutation({'book_id': existing['book_id'], 'source_type': 'world_state', 'source_id': ws_id, 'deleted': True})
 
     # ============== 角色心理档案 ==============
 
@@ -1421,11 +1950,27 @@ class Database:
                       data.get('source_node_id', ''), encrypt(data.get('chapter_title', '')),
                       encrypt(data.get('source_excerpt', '')), encrypt(data.get('foreshadow_refs', '')),
                       1 if data.get('is_manual') else 0, now, now))
+        if self._fts5_enabled:
+            self.upsert_search_document(
+                data['book_id'],
+                'character_history',
+                hid,
+                title=data.get('character_name', ''),
+                body='\n'.join([part for part in [data.get('summary', ''), data.get('details', ''), data.get('source_excerpt', '')] if part]),
+                meta={
+                    'character_name': data.get('character_name', ''),
+                    'chapter_title': data.get('chapter_title', ''),
+                    'entry_type': data.get('entry_type', 'event'),
+                },
+                conn=conn,
+            )
         conn.commit()
         conn.close()
+        self._emit_mutation({'book_id': data['book_id'], 'source_type': 'character_history', 'source_id': hid})
         return hid
 
     def update_character_history(self, history_id, data):
+        existing = self.get_search_document('character_history', history_id)
         conn = self._conn()
         fields = []
         vals = []
@@ -1447,14 +1992,26 @@ class Database:
         conn.execute(f'UPDATE character_history SET {",".join(fields)} WHERE id=?', vals)
         conn.commit()
         conn.close()
+        if existing:
+            self.sync_search_document('character_history', history_id, book_id=existing['book_id'])
+            self._emit_mutation({'book_id': existing['book_id'], 'source_type': 'character_history', 'source_id': history_id})
 
     def delete_character_history(self, history_id):
+        existing = self.get_search_document('character_history', history_id)
         conn = self._conn()
+        if existing and self._fts5_enabled:
+            self.delete_search_documents(existing['book_id'], source_type='character_history', source_id=history_id, conn=conn)
         conn.execute('DELETE FROM character_history WHERE id=?', (history_id,))
         conn.commit()
         conn.close()
+        if existing:
+            self._emit_mutation({'book_id': existing['book_id'], 'source_type': 'character_history', 'source_id': history_id, 'deleted': True})
 
     def delete_generated_character_history(self, book_id, character_name=None, source_node_id=None):
+        existing_entries = self.get_character_history(book_id, character_name=character_name)
+        if source_node_id:
+            existing_entries = [item for item in existing_entries if item.get('source_node_id') == source_node_id]
+        existing_entries = [item for item in existing_entries if not item.get('is_manual')]
         conn = self._conn()
         query = 'DELETE FROM character_history WHERE book_id=? AND is_manual=0'
         vals = [book_id]
@@ -1464,9 +2021,14 @@ class Database:
         if source_node_id:
             query += ' AND source_node_id=?'
             vals.append(source_node_id)
+        if self._fts5_enabled:
+            for item in existing_entries:
+                self.delete_search_documents(book_id, source_type='character_history', source_id=item['id'], conn=conn)
         conn.execute(query, tuple(vals))
         conn.commit()
         conn.close()
+        for item in existing_entries:
+            self._emit_mutation({'book_id': book_id, 'source_type': 'character_history', 'source_id': item['id'], 'deleted': True})
 
     def replace_generated_character_history(self, book_id, character_name, entries, source_node_id=None):
         self.delete_generated_character_history(book_id, character_name=character_name, source_node_id=source_node_id)
@@ -2194,8 +2756,19 @@ class Database:
                       encrypt(data.get('state_value', '')), encrypt(data.get('scene_context', '')),
                       data.get('last_updated_node', ''), data.get('source_node_id', ''),
                       data.get('source_type', 'manual'), data.get('valid_from_node', ''), now))
+        if self._fts5_enabled:
+            self.upsert_search_document(
+                data['book_id'],
+                'world_state',
+                new_id,
+                title=data.get('entity_name', ''),
+                body='\n'.join([part for part in [data.get('entity_name', ''), data.get('state_value', ''), data.get('scene_context', '')] if part]),
+                meta={'state_type': data.get('state_type', ''), 'state_value': data.get('state_value', '')},
+                conn=conn,
+            )
         conn.commit()
         conn.close()
+        self._emit_mutation({'book_id': data['book_id'], 'source_type': 'world_state', 'source_id': new_id})
         return new_id
 
     # ============== 版本分支增强 ==============
@@ -2248,15 +2821,22 @@ class Database:
 
     # ============== Embedding 索引 ==============
 
-    def save_embedding_chunks(self, chunks):
+    def save_embedding_chunks(self, *args):
+        if len(args) == 1:
+            chunks = args[0]
+        elif len(args) == 2:
+            _, chunks = args
+        else:
+            raise TypeError('save_embedding_chunks expects chunks or (book_id, chunks)')
         conn = self._conn()
         for ch in chunks:
+            chunk_text = ch.get('chunk_text', ch.get('text', ''))
             conn.execute(
                 '''INSERT OR REPLACE INTO embedding_chunks
                    (id, book_id, source_type, source_id, chunk_index, chunk_text, embedding, metadata, created_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                 (ch['id'], ch['book_id'], ch['source_type'], ch['source_id'],
-                 ch.get('chunk_index', 0), ch['chunk_text'],
+                 ch.get('chunk_index', 0), chunk_text,
                  ch.get('embedding'), json.dumps(ch.get('metadata', {}), ensure_ascii=False),
                  ch.get('created_at', datetime.now().isoformat()))
             )
@@ -2307,6 +2887,22 @@ class Database:
         row = conn.execute('SELECT * FROM embedding_index_meta WHERE book_id=?', (book_id,)).fetchone()
         conn.close()
         return dict(row) if row else None
+
+    def delete_embedding_chunks(self, book_id):
+        self.delete_embedding_chunks_by_source(book_id)
+
+    def save_embedding_index_meta(self, book_id, user_id, dim, chunk_count, model_id, last_built_at=None):
+        self.save_index_meta({
+            'book_id': book_id,
+            'user_id': user_id,
+            'dim': dim,
+            'chunk_count': chunk_count,
+            'model_id': model_id,
+            'last_built_at': last_built_at,
+        })
+
+    def get_embedding_index_meta(self, book_id):
+        return self.get_index_meta(book_id)
 
     # ============== NER 实体识别 ==============
 

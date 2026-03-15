@@ -284,6 +284,17 @@ class MemoryEngine:
 
         return {'status': 'ok', 'chunk_count': len(chunks)}
 
+    def refresh_retrieval_index(self, book_id, source_type=None, source_id=None):
+        """在内容变更后刷新内存检索索引。
+
+        正文改动走增量，其他来源由于 TF-IDF/BM25 需要重建全书向量，退化为整书重建。
+        """
+        if book_id not in self._faiss_chunks:
+            return {'status': 'skipped', 'reason': 'no_cached_index'}
+        if source_type == 'content' and source_id:
+            return self.incremental_update_index(book_id, source_id)
+        return self.vectorize_book(book_id)
+
     def vector_retrieve(self, book_id, query, top_k=5, user_id=None):
         """混合检索：优先 embedding，降级到 TF-IDF/FAISS + BM25（RRF 融合排序），失败时回退到关键词匹配"""
         # 优先使用 embedding 检索

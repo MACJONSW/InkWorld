@@ -10,6 +10,81 @@ class SearchEngine:
         self.db = db
 
     def search(self, book_id, query, scope=None, entity_type=None):
+        if self.db.search_index_enabled():
+            indexed = self._search_with_fts(book_id, query, scope=scope, entity_type=entity_type)
+            if scope:
+                if indexed.get(scope):
+                    return indexed
+            elif any(indexed.values()):
+                return indexed
+        return self._legacy_search(book_id, query, scope=scope, entity_type=entity_type)
+
+    def _search_with_fts(self, book_id, query, scope=None, entity_type=None):
+        results = {
+            'content': [],
+            'summary': [],
+            'lorebook': [],
+            'character_history': [],
+            'world_state': []
+        }
+        if not query:
+            return results
+
+        docs = self.db.search_documents(book_id, query, scope=scope, limit=100)
+        for doc in docs:
+            source_type = doc.get('source_type')
+            meta = doc.get('meta') or {}
+            excerpt = doc.get('excerpt') or ''
+
+            if source_type == 'content':
+                content_data = self.db.get_node_content(doc['source_id'])
+                content = content_data.get('content', '')
+                positions = self._find_positions(content, query)
+                if positions:
+                    excerpts = [self._excerpt(content, pos, query) for pos in positions[:3]]
+                elif excerpt:
+                    excerpts = [excerpt]
+                else:
+                    excerpts = [self._short(content, 200)]
+                results['content'].append({
+                    'node_id': doc['source_id'],
+                    'title': doc.get('title', ''),
+                    'match_count': max(len(positions), 1 if excerpts else 0),
+                    'excerpts': excerpts
+                })
+            elif source_type == 'summary':
+                results['summary'].append({
+                    'node_id': meta.get('node_id', ''),
+                    'chapter_title': meta.get('chapter_title', '') or doc.get('title', ''),
+                    'excerpt': excerpt
+                })
+            elif source_type == 'lorebook':
+                if entity_type and meta.get('category') != entity_type:
+                    continue
+                results['lorebook'].append({
+                    'id': doc['source_id'],
+                    'name': doc.get('title', ''),
+                    'category': meta.get('category', ''),
+                    'excerpt': excerpt
+                })
+            elif source_type == 'character_history':
+                results['character_history'].append({
+                    'id': doc['source_id'],
+                    'character_name': meta.get('character_name', '') or doc.get('title', ''),
+                    'chapter_title': meta.get('chapter_title', ''),
+                    'excerpt': excerpt
+                })
+            elif source_type == 'world_state':
+                results['world_state'].append({
+                    'id': doc['source_id'],
+                    'entity_name': doc.get('title', ''),
+                    'state_type': meta.get('state_type', ''),
+                    'state_value': meta.get('state_value', '')
+                })
+
+        return results
+
+    def _legacy_search(self, book_id, query, scope=None, entity_type=None):
         """跨章节全文搜索，结果按类别分组。
         scope: 'content'|'summary'|'lorebook'|'character_history'|'world_state'|None(all)
         """

@@ -98,47 +98,38 @@ class EmbeddingEngine:
                 })
 
         # Lorebook
-        conn = self.db._conn()
-        for row in conn.execute('SELECT * FROM lorebook WHERE book_id=? AND enabled=1', (book_id,)):
-            entry = dict(row)
-            text = f"{entry.get('name','')}: {entry.get('description','')}\n{entry.get('content','')}"
+        for entry in self.db.get_lorebook_entries(book_id):
+            if not entry.get('enabled', 1):
+                continue
+            text = f"{entry.get('name', '')}: {entry.get('description', '')}\n{entry.get('content', '')}"
             _split(text, 'lorebook', entry['id'], {'name': entry.get('name', '')})
 
         # Summaries
-        for row in conn.execute('SELECT * FROM chapter_summaries WHERE book_id=?', (book_id,)):
-            s = dict(row)
-            _split(s.get('summary', ''), 'summary', s['id'], {'chapter_title': s.get('chapter_title', '')})
+        for summary in self.db.get_chapter_summaries(book_id):
+            text = '\n'.join([part for part in [summary.get('summary', ''), summary.get('key_events', '')] if part])
+            _split(text, 'summary', summary['id'], {'chapter_title': summary.get('chapter_title', '')})
 
         # Character history
-        for row in conn.execute('SELECT * FROM character_history WHERE book_id=?', (book_id,)):
-            h = dict(row)
-            text = f"{h.get('character_name','')}: {h.get('summary','')} {h.get('details','')}"
-            _split(text, 'character_history', h['id'], {'character_name': h.get('character_name', '')})
+        for history in self.db.get_character_history(book_id):
+            text = f"{history.get('character_name', '')}: {history.get('summary', '')} {history.get('details', '')}"
+            _split(text, 'character_history', history['id'], {'character_name': history.get('character_name', '')})
 
         # World state
-        for row in conn.execute('SELECT * FROM world_state WHERE book_id=?', (book_id,)):
-            ws = dict(row)
-            text = f"{ws.get('entity_name','')}: {ws.get('state_type','')}={ws.get('state_value','')}"
-            _split(text, 'world_state', ws['id'], {'entity_name': ws.get('entity_name', '')})
+        for state in self.db.get_world_state(book_id):
+            text = f"{state.get('entity_name', '')}: {state.get('state_type', '')}={state.get('state_value', '')}"
+            _split(text, 'world_state', state['id'], {'entity_name': state.get('entity_name', '')})
 
         # Foreshadowing
-        for row in conn.execute('SELECT * FROM foreshadowing WHERE book_id=?', (book_id,)):
-            f = dict(row)
-            text = f"{f.get('label','')}: {f.get('text','')} {f.get('description','')}"
-            _split(text, 'foreshadowing', f['id'], {'label': f.get('label', '')})
+        for item in self.db.get_foreshadowing(book_id):
+            text = f"{item.get('label', '')}: {item.get('text', '')} {item.get('description', '')} {item.get('resolved_text', '')}"
+            _split(text, 'foreshadowing', item['id'], {'label': item.get('label', '')})
 
         # Node content
-        nodes = conn.execute(
-            'SELECT n.id, n.title FROM nodes n WHERE n.book_id=? AND n.type IN (?, ?)',
-            (book_id, 'chapter', 'scene')
-        ).fetchall()
-        for node in nodes:
-            node_d = dict(node)
-            content_row = conn.execute('SELECT content FROM node_contents WHERE node_id=?', (node_d['id'],)).fetchone()
-            if content_row and content_row['content']:
-                _split(content_row['content'], 'content', node_d['id'], {'chapter_title': node_d.get('title', '')})
+        for node in self.db.get_all_node_contents(book_id):
+            if node.get('type') not in ('chapter', 'scene'):
+                continue
+            _split(node.get('content', ''), 'content', node['id'], {'chapter_title': node.get('title', '')})
 
-        conn.close()
         return chunks
 
     def build_index(self, book_id, user_id):
@@ -159,9 +150,11 @@ class EmbeddingEngine:
         self.db.delete_embedding_chunks(book_id)
         for i, chunk in enumerate(chunks):
             chunk['id'] = str(uuid.uuid4())[:12]
+            chunk['book_id'] = book_id
+            chunk['chunk_text'] = chunk['text']
             chunk['embedding'] = vectors[i].tobytes()
             chunk['created_at'] = now
-        self.db.save_embedding_chunks(book_id, chunks)
+        self.db.save_embedding_chunks(chunks)
         client_, model_id, _ = self.get_embedding_client(user_id)
         self.db.save_embedding_index_meta(book_id, user_id, dim, len(chunks), model_id or 'unknown', now)
 
@@ -192,6 +185,17 @@ class EmbeddingEngine:
         all_chunks = self._collect_chunks(book_id)
         relevant = [c for c in all_chunks if c['source_type'] == source_type and c['source_id'] == source_id]
         if not relevant:
+            meta = self.db.get_embedding_index_meta(book_id) or {}
+            client_, model_id, _ = self.get_embedding_client(user_id)
+            self.db.save_embedding_index_meta(
+                book_id,
+                user_id,
+                meta.get('dim', 0),
+                len(self.db.get_embedding_chunks(book_id)),
+                model_id or meta.get('model_id', 'unknown'),
+                datetime.now().isoformat(),
+            )
+            self._invalidate_cache(book_id)
             return 0
 
         texts = [c['text'] for c in relevant]
@@ -202,9 +206,22 @@ class EmbeddingEngine:
         now = datetime.now().isoformat()
         for i, chunk in enumerate(relevant):
             chunk['id'] = str(uuid.uuid4())[:12]
+            chunk['book_id'] = book_id
+            chunk['chunk_text'] = chunk['text']
             chunk['embedding'] = vectors[i].tobytes()
             chunk['created_at'] = now
-        self.db.save_embedding_chunks(book_id, relevant)
+        self.db.save_embedding_chunks(relevant)
+
+        meta = self.db.get_embedding_index_meta(book_id) or {}
+        client_, model_id, _ = self.get_embedding_client(user_id)
+        self.db.save_embedding_index_meta(
+            book_id,
+            user_id,
+            vectors.shape[1],
+            len(self.db.get_embedding_chunks(book_id)),
+            model_id or meta.get('model_id', 'unknown'),
+            now,
+        )
 
         # 重建内存索引
         self._invalidate_cache(book_id)
